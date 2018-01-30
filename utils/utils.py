@@ -79,7 +79,7 @@ def doMovies(movies):
     movies["genres"] = movies.genres.str.split("\|")
     genresMap = Counter()
     movies.genres.map(genresMap.update)
-    om = OrderedMapper().fit([e[0] for e in genresMap.most_common()])
+    om = PartialMapper().fit([e[0] for e in genresMap.most_common()])
     movies["genres"] = movies.genres.map(lambda lst: [om.enc[e] for e in lst])
     return movies, om
 
@@ -118,6 +118,7 @@ def dcg_score(y_true, y_score, k=10, gains="exponential"):
     -------
     DCG @k : float
     """
+    order = np.argsort(y_score)[::-1]
     y_true = np.take(y_true, order[:k])
     if gains == "exponential":
         gains = 2 ** y_true - 1
@@ -211,11 +212,10 @@ class CounterEncoder(BaseMapper):
         return self
 
 class PartialMapper(BaseMapper):
-    def __init__(self, n_total:int, keep_order=False):
-        self.exists = set()
-        self.classes_ = []
-        self.n_total = n_total
-        self.keep_order = keep_order
+    def __init__(self, padding_null=False):
+        self.exists = set() if not padding_null else set([None])
+        self.classes_ = []  if not padding_null else [None]
+        # self.n_total = n_total
 
     def partial_fit(self, y):
         try:
@@ -226,15 +226,14 @@ class PartialMapper(BaseMapper):
         except Exception as e:
             y = set([y])
 
-        batch = [e for e in y if e not in self.exists] if self.keep_order else \
-                 list(set(y) - self.exists)
         # n_next = len(self.classes_) + len(batch)
         # if n_next > self.n_total:
         #     raise Exception('number of unique value out of range, '
         #                     'expected {}, got {}'.format(self.n_total, n_next))
 
-        self.classes_ += batch
+        self.classes_ += list(set(y) - self.exists)
         self.exists.update(self.classes_)
+
         idx = np.arange(len(self.classes_))
         self.enc = dict(zip(self.classes_, idx))
         self.inv_enc = dict(zip(idx, self.classes_))

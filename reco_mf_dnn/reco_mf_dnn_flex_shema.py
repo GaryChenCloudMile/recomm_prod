@@ -4,94 +4,126 @@ from collections import OrderedDict
 seed = 88
 np.random.seed(seed)
 tf.set_random_seed(seed)
+pd.set_option('display.width', 100)
 
 class Schema(object):
     # config attrs
+    COLUMNS = "columns"
     USER = 'user'
     ITEM = 'item'
+    LABEL = 'label'
 
     ID = 'id'
     DTYPE = 'dtype'
     DTYPE_ARY = ['str', 'float', 'int', 'datetime']
     DATE_FORMAT = 'date_format'
-    MODEL_DTYPE = 'model_dtype'
-    M_DTYPE_ARY = ['cont', 'catg']
+    M_DTYPE = 'm_dtype'
+    M_DTYPE_ARY = ['cont', 'catg', 'datetime']
     N_UNIQUE = 'n_unique'
     IS_MULTI = 'is_multi'
     SEP = 'sep'
     AUX = 'aux'
     TYPE = 'type'
 
-    COL_ATTR = [ID, DTYPE, DATE_FORMAT, MODEL_DTYPE, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE]
-    COL_TYPE = [np.str, np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str]
-    DEFAULT  = ['', '', '', '', 0, False, '', False, '', '']
+
+    COL_ATTR = [ID, DATE_FORMAT, M_DTYPE, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE]
+    COL_TYPE = [np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str]
+    DEFAULT  = ['', '', '', 0, False, '', False, '']
 
     def __init__(self, fpath):
         """"""
         self.dtypes_ = {}
+        self.extract(fpath).check().check_data().transform()
 
-        self.parse(fpath)
-        self.check()
-
-    def parse(self, json_conf):
+    def extract(self, json_conf):
+        """extract JSON config file"""
         self.conf = json.loads(json_conf)
-        data = []
-        for tpe in (Schema.USER, Schema.ITEM):
-            for obj in self.conf[tpe]:
-                if obj[Schema.DTYPE] is not None:
-                    self.dtypes_[obj[Schema.ID]] = obj[Schema.DTYPE]
-                obj[Schema.TYPE] = tpe
-                data.append(obj)
+        for k in (Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS):
+            assert k in self.conf, 'config requires {} attrs, actual {}'\
+                .format([Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS], list(self.conf.keys()))
 
-        # for col, tpe, default in zip(Schema.COL_ATTR, Schema.COL_TYPE, Schema.DEFAULT):
-        #     self.df_conf[col] = self.df_conf[col].astype(tpe, errors='ignore') # .fillna(default)
-        self.df_conf = (pd.DataFrame(columns=Schema.COL_ATTR, data=data)
-                        .reset_index(drop=True))
+        cols = []
+        for r in self.conf[Schema.COLUMNS]:
+            cols.append(r)
 
-        for col, def_val in [(Schema.IS_MULTI, False), (Schema.AUX, False)]:
-            self.df_conf[col] = self.df_conf[col].fillna(def_val)
+        self.df_conf = (pd.DataFrame(columns=Schema.COL_ATTR, data=cols)
+                            .reset_index(drop=True))
+
+        self.df_conf.loc[self.df_conf.id.isin(self.conf['item']), 'type'] = 'item'
+        self.df_conf.loc[self.df_conf.id.isin(self.conf['user']), 'type'] = 'user'
+        self.df_conf.loc[self.df_conf.id.isin(self.conf['label']), 'type'] = 'label'
+
+        for col, tpe, default in zip(Schema.COL_ATTR, Schema.COL_TYPE, Schema.DEFAULT):
+            self.df_conf[col] = self.df_conf[col].fillna(default).astype(tpe)
+
+        return self
 
     def check(self):
-        conf = self.df_conf
+        """check user input columns configs"""
 
-        has_dtypes = conf[pd.notnull(conf[Schema.DTYPE])]
-        self.dtypes_ = dict(zip(has_dtypes[Schema.ID], has_dtypes[Schema.DTYPE]))
-        # check if exists [id, model_dtype] attrs
+        # check if basic attr exists
+        df_conf = self.df_conf.query("type != ''")
+        base = df_conf.query("{} == '' or {} == ''".format(Schema.ID, Schema.M_DTYPE))
+        assert len(base) == 0, 'require {} attrs, check following settings:\n{}'\
+            .format([Schema.ID, Schema.DTYPE, Schema.M_DTYPE], base)
 
+        # check if user, item, label columns in self.conf['columns']
+        for k in (Schema.USER, Schema.ITEM, Schema.LABEL):
+            unknowns = set(self.conf[k]) - set(df_conf[Schema.ID])
+            assert len(unknowns) == 0, '{} not found in {} column settings'.format(list(unknowns), k)
 
-        # check categorical column, value of n_unique must > 0
-        catg = conf[conf[Schema.MODEL_DTYPE] == 'catg']
-        for _, r in catg.iterrows():
-            assert r[Schema.N_UNIQUE] > 0, \
-                '[{}] categorical columns expect value of {} value > 0, actual [{}]'\
-                    .format(r[Schema.ID], Schema.N_UNIQUE, r[Schema.N_UNIQUE])
+        # check if dtype in [str, float, int, datetime]
+        # err_dtypes = conf[~conf[Schema.DTYPE].isin(Schema.DTYPE_ARY)]
+        # assert len(err_dtypes) == 0, 'require value of {} in {}, check following:\n{}'\
+        #     .format(Schema.DTYPE, Schema.DTYPE_ARY, err_dtypes)
 
-        # check multi categorical column, there must be attrs in [n_unique, sep]
-        multi = conf[conf[Schema.IS_MULTI] == True]
-        for _, r in multi.iterrows():
-            assert pd.notnull(r[Schema.SEP]), \
-                '[{}] multivalent columns expect {} attr, actual [{}]'.format(r[Schema.ID], Schema.SEP, None)
+        # check if m_dtype in [cont, catg, datetime]
+        err_m_dtypes = df_conf[~df_conf[Schema.M_DTYPE].isin(Schema.M_DTYPE_ARY)]
+        assert len(err_m_dtypes) == 0, 'require value of {} in {}, check following:\n{}' \
+            .format(Schema.M_DTYPE, Schema.M_DTYPE_ARY, err_m_dtypes)
 
+        # check catg columns
+        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
+        null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
+        assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
+                                        'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
 
-    def to_placeholder(self):
-        """"""
-        ret = {Schema.USER: OrderedDict(), Schema.ITEM: OrderedDict()}
-        for key in ret.keys():
-            for conf in self.conf.get(key):
-                for k in (Schema.ID, Schema.TYPE):
-                    assert Schema.ID in conf, '{} attr not found! {}'.format(k, conf)
-                # if Schema.DIMENSION in conf:
-                #     assert Schema.N_UNIQUE in conf, \
-                #         '[{}] attr not found in catg cols [{}]'.format(Schema.N_UNIQUE, conf[Schema.NAME])
-                #     assert int(conf[Schema.DIMENSION]) in Schema.DIM_ARY, \
-                #         '[{}] expected embedding size in {}, actual: {}'.format(Schema.DIMENSION, Schema.DIM_ARY, conf[Schema.DIMENSION])
+        multi_no_sep = catg.query("{} == True and {} == ''".format(Schema.IS_MULTI, Schema.SEP))
+        assert len(multi_no_sep) == 0, 'multivalent column expect {} attr, check following:\n{}'\
+            .format(Schema.SEP, multi_no_sep)
 
-                tpe = conf[Schema.TYPE].lower()
-                shape = [None, None] if tpe == 'array' else [None]
-                ret[key][conf[Schema.ID]] = tf.placeholder(self.tf_type[tpe], shape=shape, name=conf[Schema.NAME])
-        return ret
-        # a = tf.placeholder(self.type_map['int'], shape=[None])
-        # print(a)
+        # datetime column requires date_format settings
+        dt_no_format = df_conf.query("{} == 'datetime' and date_format == ''".format(Schema.M_DTYPE))
+        assert len(dt_no_format) == 0, 'datetime column expect {} attr, check following:\n{}' \
+            .format(Schema.DATE_FORMAT, dt_no_format)
+        return self
+
+    def transform(self):
+        """fetch configs states"""
+        from datetime import  datetime
+
+        df_conf = self.df_conf.query("type != ''")
+
+        # str dtype for all catg + datetime columns
+        # float dtype for all cont columns
+        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
+        dt = df_conf.query("{} == 'datetime'".format(Schema.M_DTYPE))
+        cont = df_conf.query("{} == 'cont'".format(Schema.M_DTYPE))
+        dt_catg = pd.concat([dt, catg], ignore_index=True)
+
+        dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
+        dtype.update( dict(zip(cont[Schema.ID], ['float'] * len(cont))) )
+        # print('dtype', dtype)
+        for chunk in pd.read_csv('./merged_movielens.csv',
+                                 names=df_conf[Schema.ID].values,
+                                 chunksize=10, dtype=dtype):
+            # transform datetime cols
+            for _, r in dt.iterrows():
+                chunk[ r[Schema.ID] ] = chunk[r[Schema.ID]]\
+                    .map(lambda e: datetime.strptime(e, r[Schema.DATE_FORMAT]).timestamp())
+            # print(chunk)
+            break
+
 
 
 class Conf(
