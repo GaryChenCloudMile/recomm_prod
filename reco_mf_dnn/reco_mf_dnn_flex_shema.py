@@ -1,5 +1,6 @@
 import numpy as np, tensorflow as tf, os, shutil, time, json, pandas as pd, collections
 from collections import OrderedDict
+from ..utils import utils
 
 seed = 88
 np.random.seed(seed)
@@ -33,7 +34,7 @@ class Schema(object):
     def __init__(self, fpath):
         """"""
         self.dtypes_ = {}
-        self.extract(fpath).check().check_data().transform()
+        self.extract(fpath).check().transform()
 
     def extract(self, json_conf):
         """extract JSON config file"""
@@ -113,14 +114,27 @@ class Schema(object):
 
         dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
         dtype.update( dict(zip(cont[Schema.ID], ['float'] * len(cont))) )
-        # print('dtype', dtype)
+        col_states = {}
+
         for chunk in pd.read_csv('./merged_movielens.csv',
                                  names=df_conf[Schema.ID].values,
                                  chunksize=10, dtype=dtype):
+            for _, r in df_conf.iterrows():
+                name = r[Schema.ID]
+                if r[Schema.M_DTYPE] == 'catg':
+                    if name not in col_states:
+                        col_states[name] = utils.PartialMapper(padding_null=True)
+                elif r[Schema.M_DTYPE] == 'cont':
+                    if name not in col_states:
+                        col_states[name] = utils.PartialMapper(padding_null=True)
+                elif r[Schema.M_DTYPE] == 'datetime':
+
+
+
             # transform datetime cols
-            for _, r in dt.iterrows():
-                chunk[ r[Schema.ID] ] = chunk[r[Schema.ID]]\
-                    .map(lambda e: datetime.strptime(e, r[Schema.DATE_FORMAT]).timestamp())
+            # for _, r in dt.iterrows():
+            #     chunk[ r[Schema.ID] ] = chunk[r[Schema.ID]]\
+            #         .map(lambda e: datetime.strptime(e, r[Schema.DATE_FORMAT]).timestamp())
             # print(chunk)
             break
 
