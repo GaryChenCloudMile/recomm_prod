@@ -1,6 +1,6 @@
 import numpy as np, tensorflow as tf, os, shutil, time, json, pandas as pd, collections
 from collections import OrderedDict
-from ..utils import utils
+from utils import utils
 
 seed = 88
 np.random.seed(seed)
@@ -25,52 +25,68 @@ class Schema(object):
     SEP = 'sep'
     AUX = 'aux'
     TYPE = 'type'
+    COL_STATE = 'col_state'
 
 
-    COL_ATTR = [ID, DATE_FORMAT, M_DTYPE, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE]
-    COL_TYPE = [np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str]
-    DEFAULT  = ['', '', '', 0, False, '', False, '']
+    COL_ATTR = [ID, DATE_FORMAT, M_DTYPE, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
+    COL_TYPE = [np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str, np.str]
+    DEFAULT  = ['', '', '', 0, False, '', False, '', '']
 
-    def __init__(self, fpath):
-        """"""
-        self.dtypes_ = {}
-        self.extract(fpath).check().transform()
+    def __init__(self, json_path, tr_paths:list):
+        """
+        :param json_path: json columns specs configurations
+        :param tr_paths: multiple training csv files
+        """
+        # TODO: wait for fetch gcs config json file and read ...
+        json_conf = json_path
+        # TODO: wait for fetch gcs training data to parse
+        self.tr_paths_ = tr_paths
+        self.count_ = 0
+        self.df_conf_ = None
+        self.extract(json_conf).check().fit()
 
     def extract(self, json_conf):
-        """extract JSON config file"""
-        self.conf = json.loads(json_conf)
+        """extract JSON config file
+
+        :param json_conf:
+        :return:
+        """
+        self.conf_ = json.loads(json_conf)
         for k in (Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS):
-            assert k in self.conf, 'config requires {} attrs, actual {}'\
-                .format([Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS], list(self.conf.keys()))
+            assert k in self.conf_, 'config requires {} attrs, actual {}'\
+                .format([Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS], list(self.conf_.keys()))
 
         cols = []
-        for r in self.conf[Schema.COLUMNS]:
+        for r in self.conf_[Schema.COLUMNS]:
             cols.append(r)
 
-        self.df_conf = (pd.DataFrame(columns=Schema.COL_ATTR, data=cols)
-                            .reset_index(drop=True))
+        self.df_conf_ = (pd.DataFrame(columns=Schema.COL_ATTR, data=cols)
+                           .reset_index(drop=True))
 
-        self.df_conf.loc[self.df_conf.id.isin(self.conf['item']), 'type'] = 'item'
-        self.df_conf.loc[self.df_conf.id.isin(self.conf['user']), 'type'] = 'user'
-        self.df_conf.loc[self.df_conf.id.isin(self.conf['label']), 'type'] = 'label'
+        self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['item']), 'type'] = 'item'
+        self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['user']), 'type'] = 'user'
+        self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['label']), 'type'] = 'label'
 
         for col, tpe, default in zip(Schema.COL_ATTR, Schema.COL_TYPE, Schema.DEFAULT):
-            self.df_conf[col] = self.df_conf[col].fillna(default).astype(tpe)
+            self.df_conf_[col] = self.df_conf_[col].fillna(default).astype(tpe)
 
         return self
 
     def check(self):
-        """check user input columns configs"""
+        """check user input columns configs
+
+        :return: self
+        """
 
         # check if basic attr exists
-        df_conf = self.df_conf.query("type != ''")
+        df_conf = self.df_conf_.query("type != ''")
         base = df_conf.query("{} == '' or {} == ''".format(Schema.ID, Schema.M_DTYPE))
         assert len(base) == 0, 'require {} attrs, check following settings:\n{}'\
             .format([Schema.ID, Schema.DTYPE, Schema.M_DTYPE], base)
 
-        # check if user, item, label columns in self.conf['columns']
+        # check if user, item, label columns in self.conf_['columns']
         for k in (Schema.USER, Schema.ITEM, Schema.LABEL):
-            unknowns = set(self.conf[k]) - set(df_conf[Schema.ID])
+            unknowns = set(self.conf_[k]) - set(df_conf[Schema.ID])
             assert len(unknowns) == 0, '{} not found in {} column settings'.format(list(unknowns), k)
 
         # check if dtype in [str, float, int, datetime]
@@ -99,14 +115,16 @@ class Schema(object):
             .format(Schema.DATE_FORMAT, dt_no_format)
         return self
 
-    def transform(self):
-        """fetch configs states"""
+    def fit(self):
+        """fetch columns states in training data
+
+        :return:
+        """
         from datetime import  datetime
 
-        df_conf = self.df_conf.query("type != ''")
+        df_conf = self.df_conf_.query("type != ''")
 
-        # str dtype for all catg + datetime columns
-        # float dtype for all cont columns
+        # str dtype for all catg + datetime columns, float dtype for all cont columns
         catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
         dt = df_conf.query("{} == 'datetime'".format(Schema.M_DTYPE))
         cont = df_conf.query("{} == 'cont'".format(Schema.M_DTYPE))
@@ -114,29 +132,72 @@ class Schema(object):
 
         dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
         dtype.update( dict(zip(cont[Schema.ID], ['float'] * len(cont))) )
-        col_states = {}
 
-        for chunk in pd.read_csv('./merged_movielens.csv',
-                                 names=df_conf[Schema.ID].values,
-                                 chunksize=10, dtype=dtype):
-            for _, r in df_conf.iterrows():
-                name = r[Schema.ID]
-                if r[Schema.M_DTYPE] == 'catg':
-                    if name not in col_states:
-                        col_states[name] = utils.PartialMapper(padding_null=True)
-                elif r[Schema.M_DTYPE] == 'cont':
-                    if name not in col_states:
-                        col_states[name] = utils.PartialMapper(padding_null=True)
-                elif r[Schema.M_DTYPE] == 'datetime':
+        col_states = OrderedDict()
+        # './merged_movielens.csv'
+        for fpath in self.tr_paths_:
+            for chunk in pd.read_csv(fpath,
+                                     names=df_conf[Schema.ID].values,
+                                     chunksize=100, dtype=dtype):
 
+                chunk = chunk.where(pd.notnull(chunk), None)
+                # loop all valid columns except label
+                for _, r in df_conf.iterrows(): # .query("{} != '{}'".format(Schema.TYPE, Schema.LABEL))
+                    val, m_dtype, name = None, r[Schema.M_DTYPE], r[Schema.ID]
+                    # label column, currently accept catg type only
+                    if m_dtype == Schema.LABEL:
+                        if name not in col_states:
+                            col_states[name] = utils.CatgMapper(padding_null=False)
+                        # null value is not allowed in label column
+                        assert not chunk[name].hasnans, 'null value detected in label column! filename {}'\
+                            .format(fpath)
 
+                        col_states[name].partial_fit(chunk[name].values)
+                        continue
+                    # categorical column
+                    if m_dtype == 'catg':
+                        if name not in col_states:
+                            col_states[name] = utils.CatgMapper(padding_null=True)
+                        is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
+                        if is_multi:
+                            stack = set()
+                            chunk[name].str.split('\s*{}\s*'.format(sep))\
+                                       .map(lambda e: stack.update(e if e is not None else []))
+                            val = stack
+                        else:
+                            val = chunk[name].values
+                    # numeric column
+                    elif m_dtype == 'cont':
+                        if name not in col_states:
+                            col_states[name] = utils.NumericMapper()
+                        val = chunk[name].values
+                    # datetime column: transform to numeric
+                    elif m_dtype == 'datetime':
+                        if name not in col_states:
+                            col_states[name] = utils.NumericMapper()
+                        dt_fmt = r[Schema.DATE_FORMAT]
+                        val = chunk[name].dropna().map(lambda e: datetime.strptime(e, dt_fmt).timestamp()).values
 
-            # transform datetime cols
-            # for _, r in dt.iterrows():
-            #     chunk[ r[Schema.ID] ] = chunk[r[Schema.ID]]\
-            #         .map(lambda e: datetime.strptime(e, r[Schema.DATE_FORMAT]).timestamp())
-            # print(chunk)
-            break
+                    col_states[name].partial_fit(val)
+
+                # count data size
+                self.count_ += len(chunk)
+                break
+
+        valid_cond = self.df_conf_[Schema.TYPE] != ''
+        self.df_conf_.loc[valid_cond, 'col_state'] = \
+            self.df_conf_.loc[valid_cond, Schema.ID].map(lambda e: col_states[e].to_json())
+
+    def to_json(self):
+        # ret = self.df_conf_.to_json(orient='records')
+        return {
+            'count_': self.count_,
+            'df_conf_': self.df_conf_.to_json(orient='records')
+        }
+
+    @staticmethod
+    def from_json(json_str):
+        info = json.loads(json_str)
 
 
 

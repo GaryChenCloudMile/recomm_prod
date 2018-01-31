@@ -1,5 +1,6 @@
-import numpy as np, pandas as pd, pickle
+import numpy as np, pandas as pd, pickle, json
 from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import MinMaxScaler
 
 seed = 88
 np.random.seed(seed)
@@ -19,7 +20,7 @@ def get_minibatches_idx(n, batch_size, shuffle=False):
         minibatches.append(idx_list[minibatch_start:])
     return minibatches
 
-def splitIndices(nTotal, ratio, shuffle=False):
+def split_indices(nTotal, ratio, shuffle=False):
     """split index by ratio"""
     assert type(ratio) in (tuple, list), "type of ratio must in (tuple, list)"
 
@@ -43,11 +44,11 @@ def preview(fpath, chunksize=5, names=None):
     for chunk in pd.read_csv(fpath, chunksize=chunksize, names=names):
         return chunk
 
-def loadPickle(fpath):
+def load_pickle(fpath):
     with open(fpath, "rb") as r:
         return pickle.load(r)
 
-def dumpPickle(fpath, obj):
+def dump_pickle(fpath, obj):
     with open(fpath, "wb") as w:
         pickle.dump(obj, w)
 
@@ -79,7 +80,7 @@ def doMovies(movies):
     movies["genres"] = movies.genres.str.split("\|")
     genresMap = Counter()
     movies.genres.map(genresMap.update)
-    om = PartialMapper().fit([e[0] for e in genresMap.most_common()])
+    om = CatgMapper().fit([e[0] for e in genresMap.most_common()])
     movies["genres"] = movies.genres.map(lambda lst: [om.enc[e] for e in lst])
     return movies, om
 
@@ -211,10 +212,13 @@ class CounterEncoder(BaseMapper):
         self.inv_enc = dict(zip(idx, self.classes_))
         return self
 
-class PartialMapper(BaseMapper):
+class CatgMapper(BaseMapper):
+    """fit categorical feature"""
     def __init__(self, padding_null=False):
         self.exists = set() if not padding_null else set([None])
         self.classes_ = []  if not padding_null else [None]
+        self.enc = None
+        self.inv_enc = None
         # self.n_total = n_total
 
     def partial_fit(self, y):
@@ -231,12 +235,104 @@ class PartialMapper(BaseMapper):
         #     raise Exception('number of unique value out of range, '
         #                     'expected {}, got {}'.format(self.n_total, n_next))
 
-        self.classes_ += list(set(y) - self.exists)
-        self.exists.update(self.classes_)
+        batch = list(set(y) - self.exists)
+        if len(batch):
+            self.classes_ += list(set(y) - self.exists)
+            self.exists.update(self.classes_)
 
-        idx = np.arange(len(self.classes_))
-        self.enc = dict(zip(self.classes_, idx))
-        self.inv_enc = dict(zip(idx, self.classes_))
+            idx = list(range(len(self.classes_)))
+            self.enc = dict(zip(self.classes_, idx))
+            self.inv_enc = dict(zip(idx, self.classes_))
         return self
+
+    def transform(self, y):
+        return pd.Series(y).map(self.enc).values
+
+    def to_json(self):
+        info = {
+            'classes_': self.classes_
+        }
+        return json.dumps(info)
+
+    @staticmethod
+    def from_json(json_str):
+        ret = CatgMapper(True)
+        info = json.loads(json_str)
+        ret.classes_ = info['classes_']
+        ret.exists = set(ret.classes_)
+        idx = list(range(len(ret.classes_)))
+        ret.enc = dict(zip(ret.classes_, idx))
+        ret.inv_enc = dict(zip(idx, ret.classes_))
+        return ret
+
+
+class NumericMapper(object):
+    """fit numerical feature"""
+    def __init__(self):
+        self.scaler = MinMaxScaler()
+        self.max_ = None
+        self.min_ = None
+        self.cumsum_ = 0
+        self.n_total_ = 0
+
+    @property
+    def mean(self):
+        return self.cumsum_ / self.n_total_ if self.n_total_ > 0 else None
+
+    def fit(self, y):
+        return self.partial_fit(y)
+
+    def partial_fit(self, y):
+        try:
+            if isinstance(y, str):
+                raise Exception()
+
+            y = list(y)
+        except ValueError as e:
+            y = list([y])
+
+        assert not isinstance(y[0], str), 'NumericMapper requires numeric data, got string!'
+
+        y = pd.Series(y).dropna().values
+        if len(y):
+            self.cumsum_ += sum(y)
+            self.n_total_ += len(y)
+            self.scaler.partial_fit([[min(y)], [max(y)]])
+            self.max_ = self.scaler.data_max_[0]
+            self.min_ = self.scaler.data_min_[0]
+            # self.scaler.partial_fit(y[:, np.newaxis])
+        return self
+
+    def transform(self, y):
+        y = pd.Series(y).fillna(self.mean)[:, np.newaxis]
+        return self.scaler.transform(y).reshape([-1])
+
+    def fit_transform(self, y, **fit_params):
+        return self.fit(y).transform(y)
+
+    def inverse_transform(self, y):
+        y = np.array(y)[:, np.newaxis]
+        return self.scaler.inverse_transform(y).reshape([-1])
+
+    def to_json(self):
+        info = {
+            'max_': self.max_,
+            'min_': self.min_,
+            'cumsum_': self.cumsum_,
+            'n_total_': self.n_total_
+        }
+        return json.dumps(info)
+
+    @staticmethod
+    def from_json(json_str):
+        ret = NumericMapper()
+        info = json.loads(json_str)
+        ret.scaler = MinMaxScaler()
+        ret.max_ = info['max_']
+        ret.min_ = info['min_']
+        ret.scaler.partial_fit([[ret.max_], [ret.min_]])
+        ret.cumsum_ = info['cumsum_']
+        ret.n_total_ = info['n_total_']
+        return ret
 
 
