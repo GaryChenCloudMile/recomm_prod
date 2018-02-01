@@ -15,35 +15,50 @@ class Schema(object):
     LABEL = 'label'
 
     ID = 'id'
-    DTYPE = 'dtype'
-    DTYPE_ARY = ['str', 'float', 'int', 'datetime']
     DATE_FORMAT = 'date_format'
     M_DTYPE = 'm_dtype'
-    M_DTYPE_ARY = ['cont', 'catg', 'datetime']
+
+    CONT = 'cont'
+    CATG = 'catg'
+    DATETIME = 'datetime'
+    M_DTYPE_ARY = [CONT, CATG, DATETIME]
+
     N_UNIQUE = 'n_unique'
     IS_MULTI = 'is_multi'
     SEP = 'sep'
     AUX = 'aux'
+    VOCAB = 'vocab'
+    VOCAB_PATH = 'vocab_path'
     TYPE = 'type'
     COL_STATE = 'col_state'
 
 
-    COL_ATTR = [ID, DATE_FORMAT, M_DTYPE, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
+    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
     COL_TYPE = [np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str, np.str]
     DEFAULT  = ['', '', '', 0, False, '', False, '', '']
 
-    def __init__(self, json_path, tr_paths:list):
+    def __init__(self, json_path, tr_paths:list, unserialize=False):
         """
         :param json_path: json columns specs configurations
         :param tr_paths: multiple training csv files
         """
-        # TODO: wait for fetch gcs config json file and read ...
-        json_conf = json_path
+        self.json_path= json_path
         # TODO: wait for fetch gcs training data to parse
-        self.tr_paths_ = tr_paths
+        self.tr_paths = tr_paths
         self.count_ = 0
         self.df_conf_ = None
-        self.extract(json_conf).check().fit()
+        if not unserialize:
+            self.extract(self.parse_json()).check().fit()
+
+    def parse_json(self):
+        """flexibal way to fetch json string from local, GSC, etc.
+
+        :return: json string
+        """
+        # TODO: wait for fetch gcs config json file and read ...
+        import codecs
+        with codecs.open(self.json_path, 'r', encoding='utf-8') as r:
+            return r.read()
 
     def extract(self, json_conf):
         """extract JSON config file
@@ -82,7 +97,7 @@ class Schema(object):
         df_conf = self.df_conf_.query("type != ''")
         base = df_conf.query("{} == '' or {} == ''".format(Schema.ID, Schema.M_DTYPE))
         assert len(base) == 0, 'require {} attrs, check following settings:\n{}'\
-            .format([Schema.ID, Schema.DTYPE, Schema.M_DTYPE], base)
+            .format([Schema.ID, Schema.M_DTYPE], base)
 
         # check if user, item, label columns in self.conf_['columns']
         for k in (Schema.USER, Schema.ITEM, Schema.LABEL):
@@ -100,20 +115,27 @@ class Schema(object):
             .format(Schema.M_DTYPE, Schema.M_DTYPE_ARY, err_m_dtypes)
 
         # check catg columns
-        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
-        null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
-        assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
-                                        'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
-
-        multi_no_sep = catg.query("{} == True and {} == ''".format(Schema.IS_MULTI, Schema.SEP))
-        assert len(multi_no_sep) == 0, 'multivalent column expect {} attr, check following:\n{}'\
-            .format(Schema.SEP, multi_no_sep)
+        self.check_catg(df_conf)
 
         # datetime column requires date_format settings
         dt_no_format = df_conf.query("{} == 'datetime' and date_format == ''".format(Schema.M_DTYPE))
         assert len(dt_no_format) == 0, 'datetime column expect {} attr, check following:\n{}' \
             .format(Schema.DATE_FORMAT, dt_no_format)
         return self
+
+    def check_catg(self, df_conf):
+        """check catg columns
+        :param df_conf: config in pandas
+        :return: None
+        """
+        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
+        null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
+        assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
+                                        'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
+
+        multi_no_sep = catg.query("{} == True and {} == ''".format(Schema.IS_MULTI, Schema.SEP))
+        assert len(multi_no_sep) == 0, 'multivalent column expect {} attr, check following:\n{}' \
+            .format(Schema.SEP, multi_no_sep)
 
     def fit(self):
         """fetch columns states in training data
@@ -125,9 +147,9 @@ class Schema(object):
         df_conf = self.df_conf_.query("type != ''")
 
         # str dtype for all catg + datetime columns, float dtype for all cont columns
-        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
-        dt = df_conf.query("{} == 'datetime'".format(Schema.M_DTYPE))
-        cont = df_conf.query("{} == 'cont'".format(Schema.M_DTYPE))
+        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE, Schema.CATG))
+        dt = df_conf.query("{} == 'datetime'".format(Schema.M_DTYPE, Schema.DATETIME))
+        cont = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CONT))
         dt_catg = pd.concat([dt, catg], ignore_index=True)
 
         dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
@@ -135,7 +157,7 @@ class Schema(object):
 
         col_states = OrderedDict()
         # './merged_movielens.csv'
-        for fpath in self.tr_paths_:
+        for fpath in self.tr_paths:
             for chunk in pd.read_csv(fpath,
                                      names=df_conf[Schema.ID].values,
                                      chunksize=100, dtype=dtype):
@@ -147,7 +169,7 @@ class Schema(object):
                     # label column, currently accept catg type only
                     if m_dtype == Schema.LABEL:
                         if name not in col_states:
-                            col_states[name] = utils.CatgMapper(padding_null=False)
+                            col_states[name] = utils.CatgMapper(name, padding_null=False)
                         # null value is not allowed in label column
                         assert not chunk[name].hasnans, 'null value detected in label column! filename {}'\
                             .format(fpath)
@@ -155,51 +177,68 @@ class Schema(object):
                         col_states[name].partial_fit(chunk[name].values)
                         continue
                     # categorical column
-                    if m_dtype == 'catg':
-                        if name not in col_states:
-                            col_states[name] = utils.CatgMapper(padding_null=True)
+                    if m_dtype == Schema.CATG:
                         is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
-                        if is_multi:
-                            stack = set()
-                            chunk[name].str.split('\s*{}\s*'.format(sep))\
-                                       .map(lambda e: stack.update(e if e is not None else []))
-                            val = stack
-                        else:
-                            val = chunk[name].values
+                        if name not in col_states:
+                            if is_multi:
+                                col_states[name] = utils.CatgMapper(name, padding_null=True,
+                                                                is_multi=is_multi, sep=sep)
+                            else:
+                                col_states[name] = utils.CatgMapper(name, padding_null=True)
                     # numeric column
-                    elif m_dtype == 'cont':
+                    elif m_dtype == Schema.CONT:
                         if name not in col_states:
-                            col_states[name] = utils.NumericMapper()
-                        val = chunk[name].values
+                            col_states[name] = utils.NumericMapper(name)
                     # datetime column: transform to numeric
-                    elif m_dtype == 'datetime':
-                        if name not in col_states:
-                            col_states[name] = utils.NumericMapper()
+                    elif m_dtype == Schema.DATETIME:
                         dt_fmt = r[Schema.DATE_FORMAT]
-                        val = chunk[name].dropna().map(lambda e: datetime.strptime(e, dt_fmt).timestamp()).values
+                        if name not in col_states:
+                            col_states[name] = utils.DatetimeMapper(name, dt_fmt)
 
-                    col_states[name].partial_fit(val)
+                    col_states[name].partial_fit(chunk[name].values)
 
                 # count data size
                 self.count_ += len(chunk)
                 break
 
+        self.col_states_ = col_states
         valid_cond = self.df_conf_[Schema.TYPE] != ''
         self.df_conf_.loc[valid_cond, 'col_state'] = \
             self.df_conf_.loc[valid_cond, Schema.ID].map(lambda e: col_states[e].to_json())
 
     def to_json(self):
+        """
+
+        :return: json string
+        """
         # ret = self.df_conf_.to_json(orient='records')
-        return {
+        return json.dumps({
+            'json_path': self.json_path,
+            'tr_paths': self.tr_paths,
             'count_': self.count_,
-            'df_conf_': self.df_conf_.to_json(orient='records')
-        }
+            'conf_': self.conf_,
+            'df_conf_': self.df_conf_.to_dict(orient='records'),
+        })
 
     @staticmethod
     def from_json(json_str):
         info = json.loads(json_str)
+        json_path, tr_paths = info['json_path'], info['tr_paths']
+        this = Schema(json_path, tr_paths, unserialize=True)
+        for k, attr in info.items():
+            setattr(this, k, attr)
 
+        this.df_conf_ = pd.DataFrame(this.df_conf_, columns=Schema.COL_ATTR)
+        # specific class for each type
+        ser_maps = {Schema.CATG: utils.CatgMapper,
+                    Schema.CONT: utils.NumericMapper,
+                    Schema.DATETIME: utils.DatetimeMapper}
 
+        this.col_states_ = OrderedDict()
+        for _, r in this.df_conf_.query("type != ''").iterrows():
+            this.col_states_[r[Schema.ID]] = \
+                    utils.BaseMapper.from_json(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
+        return this
 
 class Conf(
     collections.namedtuple("Conf",
