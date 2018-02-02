@@ -183,13 +183,13 @@ class BaseMapper(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, y):
-        return pd.Series(y).map(self.enc).fillna(0).values
+        return pd.Series(y).map(self.enc_).fillna(0).values
 
     def fit_transform(self, y, **fit_params):
         return self.fit(y).transform(y)
 
     def inverse_transform(self, y):
-        return pd.Series(y).map(self.inv_enc).values
+        return pd.Series(y).map(self.inv_enc_).values
 
     @staticmethod
     def from_json(cls, json_str):
@@ -222,17 +222,25 @@ class CounterEncoder(BaseMapper):
 
 class CatgMapper(BaseMapper):
     """fit categorical feature"""
-    def __init__(self, name=None, padding_null=False, is_multi=False, sep=None):
+    def __init__(self, name=None, allow_null=True,
+                 is_multi=False, sep=None,
+                 vocab:list=None, vocab_path:str=None):
         self.name = name
-        self.exists_ = set() if not padding_null else set([None])
-        self.classes_ = []  if not padding_null else [None]
+        self.allow_null = allow_null
+        self.exists_ = set()
+        self.classes_ = []
         self.is_multi = is_multi
         self.sep = sep
-        self.enc = None
-        self.inv_enc = None
-        # self.n_total = n_total
+        self.vocab = vocab
+        self.vocab_path = vocab_path
+
+        self.enc_ = None
+        self.inv_enc_ = None
+        self.init_check()
 
     def init_check(self):
+        if self.vocab is not None and self.vocab_path is not None:
+            raise ValueError("choose either vocab or vocab_path, can't specified both")
         return self
 
     def partial_fit(self, y):
@@ -244,16 +252,14 @@ class CatgMapper(BaseMapper):
         except Exception as e:
             y = [y]
 
-        # n_next = len(self.classes_) + len(batch)
-        # if n_next > self.n_total:
-        #     raise Exception('number of unique value out of range, '
-        #                     'expected {}, got {}'.format(self.n_total, n_next))
+        y = pd.Series(list(set(y)))
+        if not self.allow_null:
+            assert not y.hasnans, '[{}]: null value detected'.format(self.name)
 
+        y = y.dropna()
         if self.is_multi:
             stack = set()
-            y = pd.Series(list(set(y)))
-            y.str.split('\s*{}\s*'.format(re.escape(self.sep))) \
-                 .map(lambda e: stack.update(e if e is not None else []))
+            y.str.split('\s*{}\s*'.format(re.escape(self.sep))).map(stack.update)
             y = stack
         else:
             y = set(y)
@@ -262,44 +268,66 @@ class CatgMapper(BaseMapper):
         if len(batch):
             self.classes_ += batch
             self.exists_.update(self.classes_)
-
-            idx = list(range(len(self.classes_)))
-            self.enc = dict(zip(self.classes_, idx))
-            self.inv_enc = dict(zip(idx, self.classes_))
+            self.gen_mapper()
         return self
 
+    def gen_mapper(self):
+        """according classes_ to generate enc_(encoder) and inv_enc_(decoder)
+
+        :return:
+        """
+        idx = [0] + list(range(1, len(self.classes_) + 1))
+        val = [None] + self.classes_
+        self.enc_ = dict(zip(val, idx))
+        self.inv_enc_ = dict(zip(idx, [None] + val))
+
     def transform(self, y):
+        """transform data(must fit first)
+
+        :param y: string or string list
+        :return: string splited by comma sign
+        """
+        y = pd.Series(y)
+        if not self.allow_null:
+            assert not y.hasnans, '[{}]: null value detected'.format(self.name)
+
         if self.is_multi:
-            pd.Series(y).str.split('\s*{}\s*'.format(re.escape(self.sep))) \
-                            .map(lambda ary: ','.join([self.enc[e] for e in ary]))
+            def do_multi(ary):
+                if ary is None or len(ary[0]) == 0:
+                    return [0]
+                return pd.Series(ary).map(self.enc_).fillna(0).astype(int).tolist()
+
+            return y.str.split('\s*{}\s*'.format(re.escape(self.sep))) \
+                    .map(do_multi).values
         else:
-            return pd.Series(y).map(self.enc).values
+            return y.map(self.enc_).fillna(0).astype(int).values
 
     def to_json(self):
         info = {
             'name': self.name,
             'classes_': self.classes_,
             'is_multi': self.is_multi,
-            'sep': self.sep
+            'sep': self.sep,
+            'allow_null': self.allow_null
         }
         return json.dumps(info)
 
     def from_json(self, json_str):
         info = json.loads(json_str)
-        self.classes_ = info['classes_']
-        self.exists = set(self.classes_)
-        idx = list(range(len(self.classes_)))
-        self.enc = dict(zip(self.classes_, idx))
-        self.inv_enc = dict(zip(idx, self.classes_))
         self.is_multi = info['is_multi']
+        self.allow_null = info['allow_null']
         self.sep = info['sep']
         self.name = info['name']
+        self.classes_ = info['classes_']
+        self.exists_ = set(self.classes_)
+        self.gen_mapper()
         return self
 
 
 class NumericMapper(BaseMapper):
     """fit numerical feature"""
-    def __init__(self, name=None):
+    def __init__(self, name=None, default=None):
+        self.default = default
         self.name = name
         self.scaler = MinMaxScaler()
         self.max_ = None
@@ -329,11 +357,10 @@ class NumericMapper(BaseMapper):
             self.scaler.partial_fit([[min(y)], [max(y)]])
             self.max_ = self.scaler.data_max_[0]
             self.min_ = self.scaler.data_min_[0]
-            # self.scaler.partial_fit(y[:, np.newaxis])
         return self
 
     def transform(self, y):
-        y = pd.Series(y).fillna(self.mean)[:, np.newaxis]
+        y = pd.Series(y).fillna(self.default if self.default is not None else self.mean)[:, np.newaxis]
         return self.scaler.transform(y).reshape([-1])
 
     def inverse_transform(self, y):
@@ -346,7 +373,8 @@ class NumericMapper(BaseMapper):
             'max_': self.max_,
             'min_': self.min_,
             'cumsum_': self.cumsum_,
-            'n_total_': self.n_total_
+            'n_total_': self.n_total_,
+            'default': self.default
         }
 
     def _from_json(self, info):
@@ -357,6 +385,7 @@ class NumericMapper(BaseMapper):
         self.cumsum_ = info['cumsum_']
         self.n_total_ = info['n_total_']
         self.name = info['name']
+        self.default = info['default']
 
     def to_json(self):
         return json.dumps(self._to_json())
@@ -367,9 +396,17 @@ class NumericMapper(BaseMapper):
         return self
 
 class DatetimeMapper(NumericMapper):
-    def __init__(self, name=None, dt_fmt=None):
-        super().__init__(name)
+    def __init__(self, name=None, dt_fmt=None, default=None):
+        super().__init__(name=name, default=default)
         self.dt_fmt = dt_fmt
+        self.default_ = None
+        if default is not None:
+            assert isinstance(default, str), 'datetime default value must be string!'
+            self.default = default.strip()
+            try:
+                self.default_ = datetime.strptime(self.default, self.dt_fmt).timestamp()
+            except Exception as e:
+                raise ValueError('parse default datetime [{}] failed!\n\n{}'.format(self.default, e))
 
     def partial_fit(self, y):
         try:
@@ -389,19 +426,20 @@ class DatetimeMapper(NumericMapper):
             self.scaler.partial_fit([[min(y)], [max(y)]])
             self.max_ = self.scaler.data_max_[0]
             self.min_ = self.scaler.data_min_[0]
-            # self.scaler.partial_fit(y[:, np.newaxis])
         return self
 
     def transform(self, y):
-        y = pd.Series(y).map(lambda e: datetime.strptime(e, self.dt_fmt).timestamp())
-        y = y.fillna(self.mean)[:, np.newaxis]
+        y = pd.Series(y).map(lambda e: datetime.strptime(e, self.dt_fmt).timestamp() if e is not None else None)\
+                        .fillna(self.default_ if self.default_ is not None else self.mean)[:, np.newaxis]
         return self.scaler.transform(y).reshape([-1])
 
     def _to_json(self):
         info = super()._to_json()
         info['dt_fmt'] = self.dt_fmt
+        info['default_'] = self.default_
         return info
 
     def _from_json(self, info):
         super()._from_json(info)
         self.dt_fmt = info['dt_fmt']
+        self.default_ = info['default_']

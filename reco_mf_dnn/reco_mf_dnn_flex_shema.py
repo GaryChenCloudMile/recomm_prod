@@ -1,4 +1,6 @@
-import numpy as np, tensorflow as tf, os, shutil, time, json, pandas as pd, collections
+import numpy as np, tensorflow as tf, os, shutil, time, json, pandas as pd, codecs
+import shutil
+
 from collections import OrderedDict
 from utils import utils
 
@@ -17,41 +19,48 @@ class Schema(object):
     ID = 'id'
     DATE_FORMAT = 'date_format'
     M_DTYPE = 'm_dtype'
-
+    # continous, datetime
     CONT = 'cont'
-    CATG = 'catg'
     DATETIME = 'datetime'
-    M_DTYPE_ARY = [CONT, CATG, DATETIME]
-
-    N_UNIQUE = 'n_unique'
+    # categorical
+    CATG = 'catg'
+    DEFAULT = 'default'
     IS_MULTI = 'is_multi'
-    SEP = 'sep'
-    AUX = 'aux'
     VOCAB = 'vocab'
     VOCAB_PATH = 'vocab_path'
+    SEP = 'sep'
+    AUX = 'aux'
+    M_DTYPE_ARY = [CONT, CATG, DATETIME]
     TYPE = 'type'
     COL_STATE = 'col_state'
 
 
-    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, N_UNIQUE, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
-    COL_TYPE = [np.str, np.str, np.str, np.int, np.bool, np.str, np.bool, np.str, np.str]
+    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
+    COL_TYPE = [np.str, np.str, np.str, np.str, np.bool, np.str, np.bool, np.str, np.str]
     DEFAULT  = ['', '', '', 0, False, '', False, '', '']
 
-    def __init__(self, json_path, tr_paths:list, unserialize=False):
+    def __init__(self, json_path, parsed_json_path, raw_paths:list, unserialize=False):
+        """Schema configs
+
+        :param json_path: path for json columns specs configurations
+        :param parsed_json_path: path for parsed json configurations
+        :param raw_paths: multiple raw training csv files
+        :param unserialize:
         """
-        :param json_path: json columns specs configurations
-        :param tr_paths: multiple training csv files
-        """
-        self.json_path= json_path
-        # TODO: wait for fetch gcs training data to parse
-        self.tr_paths = tr_paths
+        self.json_path = json_path
+        self.parsed_json_path = parsed_json_path
+        # TODO: wait for fetch GCS training data to parse
+        self.raw_paths = raw_paths
+
         self.count_ = 0
+        self.conf_ = None
         self.df_conf_ = None
+        self.col_states_ = None
         if not unserialize:
             self.extract(self.parse_json()).check().fit()
 
     def parse_json(self):
-        """flexibal way to fetch json string from local, GSC, etc.
+        """flexible way to fetch json string from local, GCS, etc.
 
         :return: json string
         """
@@ -128,14 +137,25 @@ class Schema(object):
         :param df_conf: config in pandas
         :return: None
         """
-        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE))
-        null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
-        assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
-                                        'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
+        catg = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CATG))
+        # null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
+        # assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
+        #                                 'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
 
         multi_no_sep = catg.query("{} == True and {} == ''".format(Schema.IS_MULTI, Schema.SEP))
         assert len(multi_no_sep) == 0, 'multivalent column expect {} attr, check following:\n{}' \
             .format(Schema.SEP, multi_no_sep)
+
+    def raw_dtype(self, df_conf):
+        # str dtype for all catg + datetime columns, float dtype for all cont columns
+        catg = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CATG))
+        dt = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.DATETIME))
+        cont = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CONT))
+        dt_catg = pd.concat([dt, catg], ignore_index=True)
+
+        dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
+        dtype.update(dict(zip(cont[Schema.ID], ['float'] * len(cont))))
+        return dtype
 
     def fit(self):
         """fetch columns states in training data
@@ -144,77 +164,70 @@ class Schema(object):
         """
         from datetime import  datetime
 
-        df_conf = self.df_conf_.query("type != ''")
-
-        # str dtype for all catg + datetime columns, float dtype for all cont columns
-        catg = df_conf.query("{} == 'catg'".format(Schema.M_DTYPE, Schema.CATG))
-        dt = df_conf.query("{} == 'datetime'".format(Schema.M_DTYPE, Schema.DATETIME))
-        cont = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CONT))
-        dt_catg = pd.concat([dt, catg], ignore_index=True)
-
-        dtype = dict(zip(dt_catg[Schema.ID], ['str'] * len(dt_catg)))
-        dtype.update( dict(zip(cont[Schema.ID], ['float'] * len(cont))) )
+        df_conf = self.df_conf_.query("{} != ''".format(Schema.TYPE))
+        dtype = self.raw_dtype(df_conf)
 
         col_states = OrderedDict()
         # './merged_movielens.csv'
-        for fpath in self.tr_paths:
+        for fpath in self.raw_paths:
             for chunk in pd.read_csv(fpath,
                                      names=df_conf[Schema.ID].values,
-                                     chunksize=100, dtype=dtype):
+                                     chunksize=10000, dtype=dtype):
 
                 chunk = chunk.where(pd.notnull(chunk), None)
                 # loop all valid columns except label
-                for _, r in df_conf.iterrows(): # .query("{} != '{}'".format(Schema.TYPE, Schema.LABEL))
-                    val, m_dtype, name = None, r[Schema.M_DTYPE], r[Schema.ID]
-                    # label column, currently accept catg type only
-                    if m_dtype == Schema.LABEL:
-                        if name not in col_states:
-                            col_states[name] = utils.CatgMapper(name, padding_null=False)
-                        # null value is not allowed in label column
-                        assert not chunk[name].hasnans, 'null value detected in label column! filename {}'\
-                            .format(fpath)
+                for _, r in df_conf.iterrows():
+                    val, m_dtype, name, col_type = None, r[Schema.M_DTYPE], r[Schema.ID], r[Schema.TYPE]
 
-                        col_states[name].partial_fit(chunk[name].values)
-                        continue
-                    # categorical column
-                    if m_dtype == Schema.CATG:
-                        is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
+                    if col_type == Schema.LABEL:
                         if name not in col_states:
-                            if is_multi:
-                                col_states[name] = utils.CatgMapper(name, padding_null=True,
-                                                                is_multi=is_multi, sep=sep)
-                            else:
-                                col_states[name] = utils.CatgMapper(name, padding_null=True)
-                    # numeric column
-                    elif m_dtype == Schema.CONT:
-                        if name not in col_states:
-                            col_states[name] = utils.NumericMapper(name)
-                    # datetime column: transform to numeric
-                    elif m_dtype == Schema.DATETIME:
-                        dt_fmt = r[Schema.DATE_FORMAT]
-                        if name not in col_states:
-                            col_states[name] = utils.DatetimeMapper(name, dt_fmt)
+                            col_states[name] = utils.CatgMapper(name, allow_null=False)
+                        # null value is not allowed in label column
+                        assert not chunk[name].hasnans, 'null value detected in label column! filename {}' \
+                            .format(fpath)
+                    else:
+                        # categorical column
+                        if m_dtype == Schema.CATG:
+                            is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
+                            if name not in col_states:
+                                if is_multi:
+                                    col_states[name] = utils.CatgMapper(name, is_multi=is_multi, sep=sep)
+                                else:
+                                    col_states[name] = utils.CatgMapper(name)
+                        # numeric column
+                        elif m_dtype == Schema.CONT:
+                            if name not in col_states:
+                                col_states[name] = utils.NumericMapper(name)
+                        # datetime column: transform to numeric
+                        elif m_dtype == Schema.DATETIME:
+                            dt_fmt = r[Schema.DATE_FORMAT]
+                            if name not in col_states:
+                                col_states[name] = utils.DatetimeMapper(name, dt_fmt)
 
                     col_states[name].partial_fit(chunk[name].values)
 
                 # count data size
                 self.count_ += len(chunk)
-                break
 
         self.col_states_ = col_states
         valid_cond = self.df_conf_[Schema.TYPE] != ''
         self.df_conf_.loc[valid_cond, 'col_state'] = \
             self.df_conf_.loc[valid_cond, Schema.ID].map(lambda e: col_states[e].to_json())
 
+        # serialize to specific path
+        with codecs.open(self.parsed_json_path, 'w', 'utf-8') as w:
+            w.write(self.to_json())
+
     def to_json(self):
-        """
+        """schema serialize to json
 
         :return: json string
         """
         # ret = self.df_conf_.to_json(orient='records')
         return json.dumps({
             'json_path': self.json_path,
-            'tr_paths': self.tr_paths,
+            'parsed_json_path': self.parsed_json_path,
+            'raw_paths': self.raw_paths,
             'count_': self.count_,
             'conf_': self.conf_,
             'df_conf_': self.df_conf_.to_dict(orient='records'),
@@ -222,6 +235,11 @@ class Schema(object):
 
     @staticmethod
     def from_json(json_str):
+        """Create Schema instance from json string
+
+        :param json_str:
+        :return:
+        """
         info = json.loads(json_str)
         json_path, tr_paths = info['json_path'], info['tr_paths']
         this = Schema(json_path, tr_paths, unserialize=True)
@@ -240,12 +258,69 @@ class Schema(object):
                     utils.BaseMapper.from_json(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
         return this
 
-class Conf(
-    collections.namedtuple("Conf",
-                           ("initializer", "source", "target_input",
-                            "target_output", "source_sequence_length",
-                            "target_sequence_length"))):
-    pass
+# class Conf(
+#     collections.namedtuple("Conf",
+#                            ("initializer", "source", "target_input",
+#                             "target_output", "source_sequence_length",
+#                             "target_sequence_length"))):
+#     pass
+
+
+class Loader(object):
+    def __init__(self, json_path, parsed_json_path, raw_paths:list=None):
+        self.json_path = json_path
+        self.parsed_json_path = parsed_json_path
+        self.raw_paths = raw_paths
+        self.schema = None
+
+    def load(self, data_path):
+        # init schema
+        if self.schema is None:
+            # 1. try unserialize
+            if os.path.isfile(self.parsed_json_path):
+                with codecs.open(self.json_path, 'r', 'utf-8') as r:
+                    Schema.from_json( json.load(r) )
+            # 2. if parsed_json_path not exists, try re-parse raw json (json_path supplied by user)
+            else:
+                self.schema = Schema(self.json_path, self.raw_paths, self.parsed_json_path)
+
+        if not os.path.isfile(data_path):
+            print('try to generate training data ... ')
+            self.gen_tr_vl(data_path)
+
+    def gen_tr_vl(self, data_path):
+        # delete original file
+        shutil.rmtree(data_path, ignore_errors=True)
+
+        df_conf = self.schema.df_conf_.set_index('id', drop=False)
+        dtype = self.schema.raw_dtype(df_conf)
+        columns = df_conf[Schema.ID].values
+        col_states = self.schema.col_states_
+        # 70% training data, 30% testing data
+        rand_seq = np.random.random(size=self.schema.count_)
+
+        with codecs.open(data_path, 'a', 'utf-8') as w:
+            for fpath in self.schema.raw_paths:
+                # hack 100 records test
+                for chunk in pd.read_csv(fpath, names=columns, chunksize=100, dtype=dtype):
+                    chunk = chunk.where(pd.notnull(chunk), None)
+
+                    for colname, col in chunk.iteritems():
+                        if not colname in col_states: continue
+
+                        # multivalent categorical columns
+                        if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
+                           df_conf.loc[colname, Schema.IS_MULTI]:
+                            val = pd.Series(col_states[colname].transform(col))
+                            # because of persistence to csv, transfer int array to string splitted by comma
+                            chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
+                        # univalent columns
+                        else:
+                            chunk[colname] = list(col_states[colname].transform(col))
+                    chunk.to_csv(w, index=False, header=None)
+                    break
+
+
 
 class ModelMfDNN(object):
     def __init__(self,
