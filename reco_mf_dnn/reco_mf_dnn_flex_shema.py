@@ -166,10 +166,14 @@ class Schema(object):
 
         df_conf = self.df_conf_.query("{} != ''".format(Schema.TYPE))
         dtype = self.raw_dtype(df_conf)
-
         col_states = OrderedDict()
         # './merged_movielens.csv'
         for fpath in self.raw_paths:
+            if not os.path.exists(fpath):
+                # TODO: wait for logging object
+                print("{} doesn't exists".format(fpath))
+                continue
+
             for chunk in pd.read_csv(fpath,
                                      names=df_conf[Schema.ID].values,
                                      chunksize=10000, dtype=dtype):
@@ -273,16 +277,27 @@ class Loader(object):
         self.raw_paths = raw_paths
         self.schema = None
 
-    def load(self, data_path):
+    def load(self, data_path, reset=False):
+        # reset: remove parsed json and rebuild
+        if reset:
+            self.schema = None
+            os.remove(self.parsed_json_path)
+            # shutil.rmtree(self.parsed_json_path)
+            shutil.rmtree(data_path, ignore_errors=True)
+
         # init schema
         if self.schema is None:
             # 1. try unserialize
             if os.path.isfile(self.parsed_json_path):
+                # TODO:
+                print('try to unserialize from {}'.format(self.parsed_json_path))
                 with codecs.open(self.json_path, 'r', 'utf-8') as r:
                     Schema.from_json( json.load(r) )
             # 2. if parsed_json_path not exists, try re-parse raw json (json_path supplied by user)
             else:
-                self.schema = Schema(self.json_path, self.raw_paths, self.parsed_json_path)
+                # TODO:
+                print('try to parse {} (user supplied) ...'.format(self.json_path))
+                self.schema = Schema(self.json_path, self.parsed_json_path, self.raw_paths)
 
         if not os.path.isfile(data_path):
             print('try to generate training data ... ')

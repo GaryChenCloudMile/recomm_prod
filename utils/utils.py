@@ -261,12 +261,12 @@ class CatgMapper(BaseMapper):
             stack = set()
             y.str.split('\s*{}\s*'.format(re.escape(self.sep))).map(stack.update)
             y = stack
-        else:
-            y = set(y)
 
-        batch = list(y - self.exists_)
-        if len(batch):
-            self.classes_ += batch
+        # batch = list(y - self.exists_)
+        if len(y):
+            clazz = set(self.classes_)
+            clazz.update(y)
+            self.classes_ = sorted(clazz)
             self.exists_.update(self.classes_)
             self.gen_mapper()
         return self
@@ -276,10 +276,15 @@ class CatgMapper(BaseMapper):
 
         :return:
         """
-        idx = [0] + list(range(1, len(self.classes_) + 1))
-        val = [None] + self.classes_
+        if self.allow_null:
+            idx = [0] + list(range(1, len(self.classes_) + 1))
+            val = [None] + self.classes_
+        else:
+            idx = list(range(0, len(self.classes_)))
+            val = self.classes_
+
         self.enc_ = dict(zip(val, idx))
-        self.inv_enc_ = dict(zip(idx, [None] + val))
+        self.inv_enc_ = dict(zip(idx, val))
 
     def transform(self, y):
         """transform data(must fit first)
