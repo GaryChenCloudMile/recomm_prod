@@ -1,7 +1,7 @@
-import numpy as np, pandas as pd, pickle, json, re
+import numpy as np, pandas as pd, pickle, json, yaml, re, codecs
 
+from io import StringIO
 from datetime import datetime
-from json import JSONEncoder
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import MinMaxScaler
 
@@ -176,6 +176,9 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 
 class BaseMapper(BaseEstimator, TransformerMixin):
+    def init_check(self):
+        return self
+
     def fit(self, y):
         return self.partial_fit(y)
 
@@ -192,8 +195,8 @@ class BaseMapper(BaseEstimator, TransformerMixin):
         return pd.Series(y).map(self.inv_enc_).values
 
     @staticmethod
-    def from_json(cls, json_str):
-        return cls().from_json(json_str)
+    def unserialize(cls, fp):
+        return cls().unserialize(fp)
 
 
 class CounterEncoder(BaseMapper):
@@ -223,24 +226,36 @@ class CounterEncoder(BaseMapper):
 class CatgMapper(BaseMapper):
     """fit categorical feature"""
     def __init__(self, name=None, allow_null=True,
-                 is_multi=False, sep=None,
-                 vocab:list=None, vocab_path:str=None):
+                 is_multi=False, sep=None, default=None,
+                 vocabs:list=None, vocabs_path:str=None):
         self.name = name
         self.allow_null = allow_null
-        self.exists_ = set()
+        self.default = default
         self.classes_ = []
         self.is_multi = is_multi
         self.sep = sep
-        self.vocab = vocab
-        self.vocab_path = vocab_path
+        self.vocabs = vocabs
+        self.vocabs_path = vocabs_path
 
+        self.freeze_ = False
         self.enc_ = None
         self.inv_enc_ = None
-        self.init_check()
 
     def init_check(self):
-        if self.vocab is not None and self.vocab_path is not None:
-            raise ValueError("choose either vocab or vocab_path, can't specified both")
+        if self.vocabs is not None and self.vocabs_path is not None:
+            raise ValueError("[{}]: choose either vocab or vocab_path, can't specified both"
+                             .format(self.name))
+        if self.vocabs is not None:
+            self.classes_ = list(pd.Series(self.vocabs).unique())
+            self.gen_mapper()
+            self.freeze_ = True
+
+        if self.vocabs_path is not None:
+            with codecs.open(self.vocabs_path, 'r', 'utf-8') as r:
+                clazz = pd.Series(r.readlines()).map(str.strip).unique()
+                self.classes_ = list(clazz[clazz != ''])
+            self.gen_mapper()
+            self.freeze_ = True
         return self
 
     def partial_fit(self, y):
@@ -262,12 +277,10 @@ class CatgMapper(BaseMapper):
             y.str.split('\s*{}\s*'.format(re.escape(self.sep))).map(stack.update)
             y = stack
 
-        # batch = list(y - self.exists_)
         if len(y):
             clazz = set(self.classes_)
             clazz.update(y)
             self.classes_ = sorted(clazz)
-            self.exists_.update(self.classes_)
             self.gen_mapper()
         return self
 
@@ -276,12 +289,8 @@ class CatgMapper(BaseMapper):
 
         :return:
         """
-        if self.allow_null:
-            idx = [0] + list(range(1, len(self.classes_) + 1))
-            val = [None] + self.classes_
-        else:
-            idx = list(range(0, len(self.classes_)))
-            val = self.classes_
+        idx = list(range(1, len(self.classes_)))
+        val = self.classes_
 
         self.enc_ = dict(zip(val, idx))
         self.inv_enc_ = dict(zip(idx, val))
@@ -296,35 +305,49 @@ class CatgMapper(BaseMapper):
         if not self.allow_null:
             assert not y.hasnans, '[{}]: null value detected'.format(self.name)
 
+        # handle outlier(regard None as outlier)
+        # if default value not in self.classes_: mapping to index which the default value mapping to
+        # else: mapping to 0
+        def do_default(data):
+            if self.default is not None:
+                data.loc[~y.isin(self.enc_)] = self.default
+            return data
+
         if self.is_multi:
             def do_multi(ary):
                 if ary is None or len(ary[0]) == 0:
                     return [0]
-                return pd.Series(ary).map(self.enc_).fillna(0).astype(int).tolist()
+                ary = do_default(pd.Series(ary))
+                return ary.map(self.enc_).fillna(0).astype(int).tolist()
 
             return y.str.split('\s*{}\s*'.format(re.escape(self.sep))) \
                     .map(do_multi).values
         else:
+            y = do_default(y)
             return y.map(self.enc_).fillna(0).astype(int).values
 
-    def to_json(self):
+    def serialize(self, fp):
         info = {
             'name': self.name,
             'classes_': self.classes_,
             'is_multi': self.is_multi,
             'sep': self.sep,
-            'allow_null': self.allow_null
+            'allow_null': self.allow_null,
+            'default': self.default,
+            'freeze_': self.freeze_
         }
-        return json.dumps(info)
+        yaml.dump(info, fp)
+        return self
 
-    def from_json(self, json_str):
-        info = json.loads(json_str)
+    def unserialize(self, fp):
+        info = yaml.load(fp)
         self.is_multi = info['is_multi']
         self.allow_null = info['allow_null']
         self.sep = info['sep']
         self.name = info['name']
         self.classes_ = info['classes_']
-        self.exists_ = set(self.classes_)
+        self.default = info['default']
+        self.default = info['freeze_']
         self.gen_mapper()
         return self
 
@@ -372,7 +395,7 @@ class NumericMapper(BaseMapper):
         y = np.array(y)[:, np.newaxis]
         return self.scaler.inverse_transform(y).reshape([-1])
 
-    def _to_json(self):
+    def _serialize(self):
         return {
             'name': self.name,
             'max_': self.max_,
@@ -382,7 +405,7 @@ class NumericMapper(BaseMapper):
             'default': self.default
         }
 
-    def _from_json(self, info):
+    def _unserialize(self, info):
         self.scaler = MinMaxScaler()
         self.max_ = info['max_']
         self.min_ = info['min_']
@@ -391,27 +414,33 @@ class NumericMapper(BaseMapper):
         self.n_total_ = info['n_total_']
         self.name = info['name']
         self.default = info['default']
-
-    def to_json(self):
-        return json.dumps(self._to_json())
-
-    def from_json(self, json_str):
-        info = json.loads(json_str)
-        self._from_json(info)
         return self
+
+    def serialize(self, fp):
+        yaml.dump(self._serialize(), fp)
+        return self
+
+    def unserialize(self, fp):
+        info = yaml.load(fp)
+        return self._unserialize(info)
 
 class DatetimeMapper(NumericMapper):
     def __init__(self, name=None, dt_fmt=None, default=None):
         super().__init__(name=name, default=default)
         self.dt_fmt = dt_fmt
         self.default_ = None
-        if default is not None:
+        self.default = default
+
+    def init_check(self):
+        if self.default is not None:
+            default = self.default
             assert isinstance(default, str), 'datetime default value must be string!'
             self.default = default.strip()
             try:
                 self.default_ = datetime.strptime(self.default, self.dt_fmt).timestamp()
             except Exception as e:
                 raise ValueError('parse default datetime [{}] failed!\n\n{}'.format(self.default, e))
+        return self
 
     def partial_fit(self, y):
         try:
@@ -438,13 +467,16 @@ class DatetimeMapper(NumericMapper):
                         .fillna(self.default_ if self.default_ is not None else self.mean)[:, np.newaxis]
         return self.scaler.transform(y).reshape([-1])
 
-    def _to_json(self):
-        info = super()._to_json()
+    def _serialize(self):
+        info = super()._serialize()
         info['dt_fmt'] = self.dt_fmt
+        info['default'] = self.default
         info['default_'] = self.default_
         return info
 
-    def _from_json(self, info):
-        super()._from_json(info)
+    def _unserialize(self, info):
+        super()._unserialize(info)
         self.dt_fmt = info['dt_fmt']
+        self.default = info['default']
         self.default_ = info['default_']
+        return self

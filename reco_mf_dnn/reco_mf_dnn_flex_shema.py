@@ -1,6 +1,6 @@
-import numpy as np, tensorflow as tf, os, shutil, time, json, pandas as pd, codecs
-import shutil
+import numpy as np, tensorflow as tf, os, time, pandas as pd, codecs, yaml, shutil
 
+from io import StringIO
 from collections import OrderedDict
 from utils import utils
 
@@ -26,6 +26,7 @@ class Schema(object):
     CATG = 'catg'
     DEFAULT = 'default'
     IS_MULTI = 'is_multi'
+    # N_UNIQUE = 'n_unique'
     VOCAB = 'vocab'
     VOCAB_PATH = 'vocab_path'
     SEP = 'sep'
@@ -34,21 +35,19 @@ class Schema(object):
     TYPE = 'type'
     COL_STATE = 'col_state'
 
-
     COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
-    COL_TYPE = [np.str, np.str, np.str, np.str, np.bool, np.str, np.bool, np.str, np.str]
-    DEFAULT  = ['', '', '', 0, False, '', False, '', '']
+    # COL_TYPE = [np.str, np.str, np.str, 'object', np.bool, np.str, np.bool, np.str, np.str]
+    # DEFAULT_VAL  = ['', '', '', '', False, '', False, '', '']
 
-    def __init__(self, json_path, parsed_json_path, raw_paths:list, unserialize=False):
+    def __init__(self, conf_path, parsed_conf_path, raw_paths:list):
         """Schema configs
 
-        :param json_path: path for json columns specs configurations
-        :param parsed_json_path: path for parsed json configurations
+        :param conf_path: path for config file columns specs configurations
+        :param parsed_conf_path: path for parsed config file configurations
         :param raw_paths: multiple raw training csv files
-        :param unserialize:
         """
-        self.json_path = json_path
-        self.parsed_json_path = parsed_json_path
+        self.conf_path = conf_path
+        self.parsed_conf_path = parsed_conf_path
         # TODO: wait for fetch GCS training data to parse
         self.raw_paths = raw_paths
 
@@ -56,26 +55,18 @@ class Schema(object):
         self.conf_ = None
         self.df_conf_ = None
         self.col_states_ = None
-        if not unserialize:
-            self.extract(self.parse_json()).check().fit()
 
-    def parse_json(self):
-        """flexible way to fetch json string from local, GCS, etc.
+    def init(self):
+        return self.extract(self.parse_conf()).check().fit()
 
-        :return: json string
-        """
-        # TODO: wait for fetch gcs config json file and read ...
+    def parse_conf(self):
+        # TODO: wait for fetch gcs config file and read ...
         import codecs
-        with codecs.open(self.json_path, 'r', encoding='utf-8') as r:
+        with codecs.open(self.conf_path, 'r', encoding='utf-8') as r:
             return r.read()
 
-    def extract(self, json_conf):
-        """extract JSON config file
-
-        :param json_conf:
-        :return:
-        """
-        self.conf_ = json.loads(json_conf)
+    def extract(self, conf):
+        self.conf_ = yaml.load(conf)
         for k in (Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS):
             assert k in self.conf_, 'config requires {} attrs, actual {}'\
                 .format([Schema.USER, Schema.ITEM, Schema.LABEL, Schema.COLUMNS], list(self.conf_.keys()))
@@ -86,14 +77,16 @@ class Schema(object):
 
         self.df_conf_ = (pd.DataFrame(columns=Schema.COL_ATTR, data=cols)
                            .reset_index(drop=True))
+        self.df_conf_ = self.df_conf_.where(self.df_conf_.notnull(), None)
+        # self.df_conf_.set_index('id', drop=False)
 
         self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['item']), 'type'] = 'item'
         self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['user']), 'type'] = 'user'
         self.df_conf_.loc[self.df_conf_.id.isin(self.conf_['label']), 'type'] = 'label'
 
-        for col, tpe, default in zip(Schema.COL_ATTR, Schema.COL_TYPE, Schema.DEFAULT):
-            self.df_conf_[col] = self.df_conf_[col].fillna(default).astype(tpe)
-
+        # is_multi, aux columns default False
+        for col in (Schema.IS_MULTI, Schema.AUX):
+            self.df_conf_[col].where(self.df_conf_[col].notnull(), False, inplace=True)
         return self
 
     def check(self):
@@ -103,15 +96,15 @@ class Schema(object):
         """
 
         # check if basic attr exists
-        df_conf = self.df_conf_.query("type != ''")
-        base = df_conf.query("{} == '' or {} == ''".format(Schema.ID, Schema.M_DTYPE))
+        df_conf = self.df_conf_.query("type.notnull()")
+        base = df_conf.query("{}.isnull() or {}.isnull()".format(Schema.ID, Schema.M_DTYPE))
         assert len(base) == 0, 'require {} attrs, check following settings:\n{}'\
             .format([Schema.ID, Schema.M_DTYPE], base)
 
         # check if user, item, label columns in self.conf_['columns']
         for k in (Schema.USER, Schema.ITEM, Schema.LABEL):
             unknowns = set(self.conf_[k]) - set(df_conf[Schema.ID])
-            assert len(unknowns) == 0, '{} not found in {} column settings'.format(list(unknowns), k)
+            assert len(unknowns) == 0, '[{}]: {} not found in columns id settings'.format(k, list(unknowns))
 
         # check if dtype in [str, float, int, datetime]
         # err_dtypes = conf[~conf[Schema.DTYPE].isin(Schema.DTYPE_ARY)]
@@ -127,22 +120,25 @@ class Schema(object):
         self.check_catg(df_conf)
 
         # datetime column requires date_format settings
-        dt_no_format = df_conf.query("{} == 'datetime' and date_format == ''".format(Schema.M_DTYPE))
-        assert len(dt_no_format) == 0, 'datetime column expect {} attr, check following:\n{}' \
-            .format(Schema.DATE_FORMAT, dt_no_format)
+        dt_no_format = df_conf.query("{} == '{}' and {}.isnull()"\
+                              .format(Schema.M_DTYPE, Schema.DATETIME, Schema.DATE_FORMAT))
+        assert len(dt_no_format) == 0, '{} column expect {} attr, check following:\n{}' \
+            .format(Schema.DATETIME, Schema.DATE_FORMAT, dt_no_format)
         return self
 
     def check_catg(self, df_conf):
         """check catg columns
+
         :param df_conf: config in pandas
         :return: None
         """
         catg = df_conf.query("{} == '{}'".format(Schema.M_DTYPE, Schema.CATG))
+
         # null_n_unique = catg.query("{} <= 0".format(Schema.N_UNIQUE))
         # assert len(null_n_unique) == 0, 'categorical column expect number of vocabs [{}] value > 0, ' \
         #                                 'check following:\n{}'.format(Schema.N_UNIQUE, null_n_unique)
 
-        multi_no_sep = catg.query("{} == True and {} == ''".format(Schema.IS_MULTI, Schema.SEP))
+        multi_no_sep = catg.query("{} == True and {}.isnull()".format(Schema.IS_MULTI, Schema.SEP))
         assert len(multi_no_sep) == 0, 'multivalent column expect {} attr, check following:\n{}' \
             .format(Schema.SEP, multi_no_sep)
 
@@ -164,7 +160,7 @@ class Schema(object):
         """
         from datetime import  datetime
 
-        df_conf = self.df_conf_.query("{} != ''".format(Schema.TYPE))
+        df_conf = self.df_conf_.query("{}.notnull()".format(Schema.TYPE))
         dtype = self.raw_dtype(df_conf)
         col_states = OrderedDict()
         # './merged_movielens.csv'
@@ -185,7 +181,7 @@ class Schema(object):
 
                     if col_type == Schema.LABEL:
                         if name not in col_states:
-                            col_states[name] = utils.CatgMapper(name, allow_null=False)
+                            col_states[name] = utils.CatgMapper(name, allow_null=False).init_check()
                         # null value is not allowed in label column
                         assert not chunk[name].hasnans, 'null value detected in label column! filename {}' \
                             .format(fpath)
@@ -195,58 +191,72 @@ class Schema(object):
                             is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
                             if name not in col_states:
                                 if is_multi:
-                                    col_states[name] = utils.CatgMapper(name, is_multi=is_multi, sep=sep)
+                                    col_states[name] = utils.CatgMapper(name, is_multi=is_multi, sep=sep)\
+                                                            .init_check()
                                 else:
-                                    col_states[name] = utils.CatgMapper(name)
+                                    col_states[name] = utils.CatgMapper(name).init_check()
                         # numeric column
                         elif m_dtype == Schema.CONT:
                             if name not in col_states:
-                                col_states[name] = utils.NumericMapper(name)
+                                col_states[name] = utils.NumericMapper(name, default=r[Schema.DEFAULT])\
+                                                        .init_check()
                         # datetime column: transform to numeric
                         elif m_dtype == Schema.DATETIME:
                             dt_fmt = r[Schema.DATE_FORMAT]
                             if name not in col_states:
-                                col_states[name] = utils.DatetimeMapper(name, dt_fmt)
-
-                    col_states[name].partial_fit(chunk[name].values)
+                                col_states[name] = utils.DatetimeMapper(name, dt_fmt, default=r[Schema.DEFAULT])\
+                                                        .init_check()
+                    if m_dtype == Schema.CATG:
+                        # if freeze_ == True, that means user provided vocabs informations,
+                        # no need to fit anymore
+                        if not col_states[name].freeze_:
+                            col_states[name].partial_fit(chunk[name].values)
+                    else:
+                        col_states[name].partial_fit(chunk[name].values)
 
                 # count data size
                 self.count_ += len(chunk)
 
         self.col_states_ = col_states
-        valid_cond = self.df_conf_[Schema.TYPE] != ''
+        valid_cond = self.df_conf_[Schema.TYPE].notnull()
+        # serialize parsed column states
+        def ser(id):
+            sio = StringIO()
+            col_states[id].serialize(sio)
+            return sio.getvalue()
+
         self.df_conf_.loc[valid_cond, 'col_state'] = \
-            self.df_conf_.loc[valid_cond, Schema.ID].map(lambda e: col_states[e].to_json())
+            self.df_conf_.loc[valid_cond, Schema.ID].map(ser)
 
         # serialize to specific path
-        with codecs.open(self.parsed_json_path, 'w', 'utf-8') as w:
-            w.write(self.to_json())
+        with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
+            self.serialize(w)
+        return self
 
-    def to_json(self):
-        """schema serialize to json
-
-        :return: json string
+    def serialize(self, fp):
         """
-        # ret = self.df_conf_.to_json(orient='records')
-        return json.dumps({
-            'json_path': self.json_path,
-            'parsed_json_path': self.parsed_json_path,
+
+        :param fp:
+        :return:
+        """
+        return yaml.dump({
+            'conf_path': self.conf_path,
+            'parsed_conf_path': self.parsed_conf_path,
             'raw_paths': self.raw_paths,
             'count_': self.count_,
             'conf_': self.conf_,
             'df_conf_': self.df_conf_.to_dict(orient='records'),
-        })
+        }, fp)
 
     @staticmethod
-    def from_json(json_str):
-        """Create Schema instance from json string
+    def unserialize(fp):
+        """Create Schema instance from config resource
 
-        :param json_str:
+        :param fp:
         :return:
         """
-        info = json.loads(json_str)
-        json_path, tr_paths = info['json_path'], info['tr_paths']
-        this = Schema(json_path, tr_paths, unserialize=True)
+        info = yaml.load(fp)
+        this = Schema(info['conf_path'], info['parsed_conf_path'], info['raw_paths'])
         for k, attr in info.items():
             setattr(this, k, attr)
 
@@ -257,9 +267,9 @@ class Schema(object):
                     Schema.DATETIME: utils.DatetimeMapper}
 
         this.col_states_ = OrderedDict()
-        for _, r in this.df_conf_.query("type != ''").iterrows():
+        for _, r in this.df_conf_.query("type.notnull()").iterrows():
             this.col_states_[r[Schema.ID]] = \
-                    utils.BaseMapper.from_json(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
+                utils.BaseMapper.unserialize(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
         return this
 
 # class Conf(
@@ -271,33 +281,33 @@ class Schema(object):
 
 
 class Loader(object):
-    def __init__(self, json_path, parsed_json_path, raw_paths:list=None):
-        self.json_path = json_path
-        self.parsed_json_path = parsed_json_path
+    def __init__(self, conf_path, parsed_conf_path, raw_paths:list=None):
+        self.conf_path = conf_path
+        self.parsed_conf_path = parsed_conf_path
         self.raw_paths = raw_paths
         self.schema = None
 
     def load(self, data_path, reset=False):
-        # reset: remove parsed json and rebuild
+        # reset: remove parsed config file and rebuild
         if reset:
             self.schema = None
-            os.remove(self.parsed_json_path)
-            # shutil.rmtree(self.parsed_json_path)
-            shutil.rmtree(data_path, ignore_errors=True)
+            for file2del in (self.parsed_conf_path, data_path):
+                if os.path.exists(file2del):
+                    os.remove(file2del)
 
         # init schema
         if self.schema is None:
             # 1. try unserialize
-            if os.path.isfile(self.parsed_json_path):
-                # TODO:
-                print('try to unserialize from {}'.format(self.parsed_json_path))
-                with codecs.open(self.json_path, 'r', 'utf-8') as r:
-                    Schema.from_json( json.load(r) )
-            # 2. if parsed_json_path not exists, try re-parse raw json (json_path supplied by user)
+            if os.path.isfile(self.parsed_conf_path):
+                # TODO: alter print function to logging
+                print('try to unserialize from {}'.format(self.parsed_conf_path))
+                with codecs.open(self.parsed_conf_path, 'r', 'utf-8') as r:
+                    self.schema = Schema.unserialize(r)
+            # 2. if parsed_conf_path not exists, try re-parse raw config file (conf_path supplied by user)
             else:
-                # TODO:
-                print('try to parse {} (user supplied) ...'.format(self.json_path))
-                self.schema = Schema(self.json_path, self.parsed_json_path, self.raw_paths)
+                # TODO: alter print function to logging
+                print('try to parse {} (user supplied) ...'.format(self.conf_path))
+                self.schema = Schema(self.conf_path, self.parsed_conf_path, self.raw_paths).init()
 
         if not os.path.isfile(data_path):
             print('try to generate training data ... ')
@@ -315,24 +325,26 @@ class Loader(object):
         rand_seq = np.random.random(size=self.schema.count_)
 
         with codecs.open(data_path, 'a', 'utf-8') as w:
-            for fpath in self.schema.raw_paths:
+            for fpath in self.raw_paths:
+                # TODO: alter print function to logging
+                print('process {} ...'.format(fpath))
                 # hack 100 records test
                 for chunk in pd.read_csv(fpath, names=columns, chunksize=100, dtype=dtype):
                     chunk = chunk.where(pd.notnull(chunk), None)
-
+                    # hack
+                    # chunk.to_csv('compare.csv', index=False)
+                    chunk = chunk[list(col_states.keys())]
                     for colname, col in chunk.iteritems():
-                        if not colname in col_states: continue
-
                         # multivalent categorical columns
                         if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
                            df_conf.loc[colname, Schema.IS_MULTI]:
                             val = pd.Series(col_states[colname].transform(col))
-                            # because of persistence to csv, transfer int array to string splitted by comma
+                            # because of persisting to csv, transfer int array to string splitted by comma
                             chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
                         # univalent columns
                         else:
                             chunk[colname] = list(col_states[colname].transform(col))
-                    chunk.to_csv(w, index=False, header=None)
+                    chunk.to_csv(w, index=False)
                     break
 
 
