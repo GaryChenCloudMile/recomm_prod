@@ -1,4 +1,4 @@
-import numpy as np, pandas as pd, pickle, json, yaml, re, codecs
+import numpy as np, pandas as pd, pickle, json, yaml, re, codecs, os
 
 from io import StringIO
 from datetime import datetime
@@ -172,9 +172,11 @@ def ndcg_score(y_true, y_score, k=10, gains="exponential"):
     return actual / best
 
 
+def rm_quiet(fpath):
+    if fpath is not None and os.path.exists(fpath) and os.path.isfile(fpath):
+        os.remove(fpath)
+
 from sklearn.base import BaseEstimator, TransformerMixin
-
-
 class BaseMapper(BaseEstimator, TransformerMixin):
     def init_check(self):
         return self
@@ -192,36 +194,13 @@ class BaseMapper(BaseEstimator, TransformerMixin):
         return self.fit(y).transform(y)
 
     def inverse_transform(self, y):
-        return pd.Series(y).map(self.inv_enc_).values
+        x = pd.Series(y).map(self.inv_enc_)
+        return x.where(x.notnull(), None)
 
     @staticmethod
     def unserialize(cls, fp):
         return cls().unserialize(fp)
 
-
-class CounterEncoder(BaseMapper):
-    """依照出現頻率進行編碼, 頻率由高到低的index = 0, 1, 2, 3 ..., 以此類推"""
-    def __init__(self, n_total:int):
-        self.counter = Counter()
-        self.classes_ = []
-
-    def partial_fit(self, y):
-        try:
-            if isinstance(y, str):
-                raise Exception()
-
-            for _ in y: break
-            self.counter.update(y)
-        except:
-            self.counter.update([y])
-
-        pair = self.counter.most_common()
-        self.classes_ = list(pair[:, 0])
-
-        idx = pair[:, 1]
-        self.enc = dict(zip(self.classes_, idx))
-        self.inv_enc = dict(zip(idx, self.classes_))
-        return self
 
 class CatgMapper(BaseMapper):
     """fit categorical feature"""
@@ -251,6 +230,9 @@ class CatgMapper(BaseMapper):
             self.freeze_ = True
 
         if self.vocabs_path is not None:
+            # TODO: alter to GCS check file
+            assert os.path.exists(self.vocabs_path), "[{}]: can't find vocabs file [{}]"\
+                                                      .format(self.name, self.vocabs_path)
             with codecs.open(self.vocabs_path, 'r', 'utf-8') as r:
                 clazz = pd.Series(r.readlines()).map(str.strip).unique()
                 self.classes_ = list(clazz[clazz != ''])
@@ -310,18 +292,18 @@ class CatgMapper(BaseMapper):
         # else: mapping to 0
         def do_default(data):
             if self.default is not None:
-                data.loc[~y.isin(self.enc_)] = self.default
+                data.loc[~data.isin(self.enc_)] = self.default
             return data
 
         if self.is_multi:
-            def do_multi(ary):
-                if ary is None or len(ary[0]) == 0:
-                    return [0]
-                ary = do_default(pd.Series(ary))
-                return ary.map(self.enc_).fillna(0).astype(int).tolist()
-
-            return y.str.split('\s*{}\s*'.format(re.escape(self.sep))) \
-                    .map(do_multi).values
+            # for performance issue, concat all sequence in a batch and do once mapping,
+            # I've encountered super worst performance in processing once per row
+            x = y.str.split('\s*{}\s*'.format(re.escape(self.sep)))
+            lens = np.cumsum(x.map(len))
+            concat = pd.Series(np.concatenate(x.values))
+            concat = do_default(concat)
+            x = concat.map(self.enc_).fillna(0).astype(int).values
+            return pd.Series(np.split(x, lens)[:-1]).map(list).values
         else:
             y = do_default(y)
             return y.map(self.enc_).fillna(0).astype(int).values
@@ -347,8 +329,33 @@ class CatgMapper(BaseMapper):
         self.name = info['name']
         self.classes_ = info['classes_']
         self.default = info['default']
-        self.default = info['freeze_']
+        self.freeze_ = info['freeze_']
         self.gen_mapper()
+        return self
+
+class CounterEncoder(CatgMapper):
+    """依照出現頻率進行編碼, 頻率由高到低的index = 0, 1, 2, 3 ..., 以此類推"""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.counter = Counter()
+        self.freq_ = []
+
+    def partial_fit(self, y):
+        try:
+            if isinstance(y, str):
+                raise Exception()
+
+            for _ in y: break
+            self.counter.update(y)
+        except:
+            self.counter.update([y])
+
+        pair = self.counter.most_common()
+        self.classes_ = list(pair[:, 0])
+
+        idx = pair[:, 1]
+        self.enc = dict(zip(self.classes_, idx))
+        self.inv_enc = dict(zip(idx, self.classes_))
         return self
 
 
@@ -362,6 +369,14 @@ class NumericMapper(BaseMapper):
         self.min_ = None
         self.cumsum_ = 0
         self.n_total_ = 0
+
+    def init_check(self):
+        if self.default is not None:
+            try:
+                float(self.default)
+            except Exception as e:
+                raise Exception('[{}]: default value must be numeric for NumericMapper'.format(self.name))
+        return self
 
     @property
     def mean(self):
@@ -396,14 +411,20 @@ class NumericMapper(BaseMapper):
         return self.scaler.inverse_transform(y).reshape([-1])
 
     def _serialize(self):
-        return {
-            'name': self.name,
-            'max_': self.max_,
-            'min_': self.min_,
-            'cumsum_': self.cumsum_,
-            'n_total_': self.n_total_,
-            'default': self.default
-        }
+        ret = {}
+        ret['name'] = self.name
+        for num_attr in ('max_', 'min_', 'cumsum_', 'n_total_', 'default'):
+            val = getattr(self, num_attr)
+            ret[num_attr] = float(val) if val is not None else None
+        return ret
+        # return {
+        #     'name': self.name,
+        #     'max_': float(self.max_),
+        #     'min_': float(self.min_),
+        #     'cumsum_': float(self.cumsum_),
+        #     'n_total_': float(self.n_total_),
+        #     'default': float(self.default)
+        # }
 
     def _unserialize(self, info):
         self.scaler = MinMaxScaler()
@@ -470,13 +491,11 @@ class DatetimeMapper(NumericMapper):
     def _serialize(self):
         info = super()._serialize()
         info['dt_fmt'] = self.dt_fmt
-        info['default'] = self.default
         info['default_'] = self.default_
         return info
 
     def _unserialize(self, info):
         super()._unserialize(info)
         self.dt_fmt = info['dt_fmt']
-        self.default = info['default']
         self.default_ = info['default_']
         return self

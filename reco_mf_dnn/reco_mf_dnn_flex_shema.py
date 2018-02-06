@@ -1,5 +1,6 @@
 import numpy as np, tensorflow as tf, os, time, pandas as pd, codecs, yaml, shutil
 
+from datetime import datetime
 from io import StringIO
 from collections import OrderedDict
 from utils import utils
@@ -27,17 +28,15 @@ class Schema(object):
     DEFAULT = 'default'
     IS_MULTI = 'is_multi'
     # N_UNIQUE = 'n_unique'
-    VOCAB = 'vocab'
-    VOCAB_PATH = 'vocab_path'
+    VOCABS = 'vocabs'
+    VOCABS_PATH = 'vocabs_path'
     SEP = 'sep'
     AUX = 'aux'
     M_DTYPE_ARY = [CONT, CATG, DATETIME]
     TYPE = 'type'
     COL_STATE = 'col_state'
 
-    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI, SEP, AUX, TYPE, COL_STATE]
-    # COL_TYPE = [np.str, np.str, np.str, 'object', np.bool, np.str, np.bool, np.str, np.str]
-    # DEFAULT_VAL  = ['', '', '', '', False, '', False, '', '']
+    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI, SEP, VOCABS, VOCABS_PATH, AUX, TYPE, COL_STATE]
 
     def __init__(self, conf_path, parsed_conf_path, raw_paths:list):
         """Schema configs
@@ -55,6 +54,22 @@ class Schema(object):
         self.conf_ = None
         self.df_conf_ = None
         self.col_states_ = None
+
+    @property
+    def cols(self):
+        return list(self.col_states_.keys())
+
+    @property
+    def user_cols(self):
+        return self.df_conf_.query("{} == '{}'".format(Schema.TYPE, Schema.USER)).id.tolist()
+
+    @property
+    def item_cols(self):
+        return self.df_conf_.query("{} == '{}'".format(Schema.TYPE, Schema.ITEM)).id.tolist()
+
+    @property
+    def label(self):
+        return self.df_conf_.query("{} == '{}'".format(Schema.TYPE, Schema.LABEL)).id.tolist()
 
     def init(self):
         return self.extract(self.parse_conf()).check().fit()
@@ -87,6 +102,8 @@ class Schema(object):
         # is_multi, aux columns default False
         for col in (Schema.IS_MULTI, Schema.AUX):
             self.df_conf_[col].where(self.df_conf_[col].notnull(), False, inplace=True)
+
+        self.df_conf_ = self.df_conf_.set_index(Schema.ID, drop=False)
         return self
 
     def check(self):
@@ -189,12 +206,20 @@ class Schema(object):
                         # categorical column
                         if m_dtype == Schema.CATG:
                             is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
+                            vocabs, vocabs_path = r[Schema.VOCABS], r[Schema.VOCABS_PATH]
                             if name not in col_states:
                                 if is_multi:
-                                    col_states[name] = utils.CatgMapper(name, is_multi=is_multi, sep=sep)\
+                                    col_states[name] = utils.CatgMapper(name,
+                                                                        is_multi=is_multi,
+                                                                        sep=sep,
+                                                                        vocabs=vocabs,
+                                                                        vocabs_path=vocabs_path)\
                                                             .init_check()
                                 else:
-                                    col_states[name] = utils.CatgMapper(name).init_check()
+                                    col_states[name] = utils.CatgMapper(name,
+                                                                        vocabs=vocabs,
+                                                                        vocabs_path=vocabs_path)\
+                                                            .init_check()
                         # numeric column
                         elif m_dtype == Schema.CONT:
                             if name not in col_states:
@@ -231,6 +256,8 @@ class Schema(object):
         # serialize to specific path
         with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
             self.serialize(w)
+
+        # output type: catg+multi to str
         return self
 
     def serialize(self, fp):
@@ -261,6 +288,7 @@ class Schema(object):
             setattr(this, k, attr)
 
         this.df_conf_ = pd.DataFrame(this.df_conf_, columns=Schema.COL_ATTR)
+        this.df_conf_ = this.df_conf_.set_index(Schema.ID, drop=False)
         # specific class for each type
         ser_maps = {Schema.CATG: utils.CatgMapper,
                     Schema.CONT: utils.NumericMapper,
@@ -287,14 +315,7 @@ class Loader(object):
         self.raw_paths = raw_paths
         self.schema = None
 
-    def load(self, data_path, reset=False):
-        # reset: remove parsed config file and rebuild
-        if reset:
-            self.schema = None
-            for file2del in (self.parsed_conf_path, data_path):
-                if os.path.exists(file2del):
-                    os.remove(file2del)
-
+    def check_schema(self):
         # init schema
         if self.schema is None:
             # 1. try unserialize
@@ -308,142 +329,81 @@ class Loader(object):
                 # TODO: alter print function to logging
                 print('try to parse {} (user supplied) ...'.format(self.conf_path))
                 self.schema = Schema(self.conf_path, self.parsed_conf_path, self.raw_paths).init()
+        return self
 
-        if not os.path.isfile(data_path):
-            print('try to generate training data ... ')
-            self.gen_tr_vl(data_path)
+    def tansform(self, src_path, tgt_path, chunksize=20000, reset=False, valid_size=None):
+        # reset: remove parsed config file and rebuild
+        if reset:
+            self.schema = None
+            utils.rm_quiet(self.parsed_conf_path)
 
-    def gen_tr_vl(self, data_path):
-        # delete original file
-        shutil.rmtree(data_path, ignore_errors=True)
+        self.check_schema()
 
-        df_conf = self.schema.df_conf_.set_index('id', drop=False)
+        # TODO: alter print function to logging
+        print('try to transform {} ... '.format(src_path))
+        self._transform(src_path, tgt_path, chunksize=chunksize, valid_size=valid_size)
+
+    def _transform(self, src_path, tgt_path, chunksize=20000, valid_size=None):
+        tr_tgt_path = '{}.tr'.format(tgt_path)
+        vl_tgt_path = '{}.vl'.format(tgt_path)
+        # delete first
+        for file2del in (tgt_path, tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
+        # if don't split, discard vl_tgt_path variable
+        if not valid_size:
+            tr_tgt_path = tgt_path
+
+        df_conf = self.schema.df_conf_
         dtype = self.schema.raw_dtype(df_conf)
         columns = df_conf[Schema.ID].values
         col_states = self.schema.col_states_
-        # 70% training data, 30% testing data
-        rand_seq = np.random.random(size=self.schema.count_)
+        pos = 0
 
-        with codecs.open(data_path, 'a', 'utf-8') as w:
-            for fpath in self.raw_paths:
-                # TODO: alter print function to logging
-                print('process {} ...'.format(fpath))
-                # hack 100 records test
-                for chunk in pd.read_csv(fpath, names=columns, chunksize=100, dtype=dtype):
-                    chunk = chunk.where(pd.notnull(chunk), None)
-                    # hack
-                    # chunk.to_csv('compare.csv', index=False)
-                    chunk = chunk[list(col_states.keys())]
-                    for colname, col in chunk.iteritems():
-                        # multivalent categorical columns
-                        if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
-                           df_conf.loc[colname, Schema.IS_MULTI]:
-                            val = pd.Series(col_states[colname].transform(col))
-                            # because of persisting to csv, transfer int array to string splitted by comma
-                            chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
-                        # univalent columns
-                        else:
-                            chunk[colname] = list(col_states[colname].transform(col))
-                    chunk.to_csv(w, index=False)
-                    break
+        trw, vlw, rand_seq = codecs.open(tr_tgt_path, 'a', 'utf-8'), None, None
+        if valid_size:
+            rand_seq = np.random.random(size=self.schema.count_)
+            vlw = codecs.open(vl_tgt_path, 'a', 'utf-8')
+        try:
+            s = datetime.now()
+            for step, chunk in enumerate(pd.read_csv(src_path, names=columns, chunksize=chunksize, dtype=dtype), 1):
+                chunk = chunk.where(pd.notnull(chunk), None)[self.schema.cols]
+                for colname, col in chunk.iteritems():
+                    # multivalent categorical columns
+                    if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
+                       df_conf.loc[colname, Schema.IS_MULTI]:
+                        val = pd.Series(col_states[colname].transform(col))
+                        # because of persist to csv, transfer int array to string splitted by comma
+                        chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
+                    # univalent columns
+                    else:
+                        chunk[colname] = list(col_states[colname].transform(col))
 
+                kws = {'index': False, 'header': None}
+                if not valid_size:
+                    chunk.to_csv(trw, **kws)
+                else:
+                    end_pos = pos + len(chunk)
+                    rand_batch = rand_seq[pos:end_pos]
+                    # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
+                    tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
+                    tr_chunk.to_csv(trw, **kws)
+                    vl_chunk.to_csv(vlw, **kws)
+                    pos = end_pos
+                # hack
+                break
 
+            # TODO: alter print function to logging
+            print('[{}]: process take time {}'.format(src_path, datetime.now() - s))
+        finally:
+            _ = trw.close() if trw is not None else None
+            _ = vlw.close() if vlw is not None else None
 
 class ModelMfDNN(object):
-    def __init__(self,
-                 n_items,
-                 n_genres,
-                 model_dir,
-                 dim=16,
-                 learning_rate=0.01,
-                 callback=None):
-        self.n_items = n_items
-        self.n_genres = n_genres
-        self.ftr_cols = OrderedDict()
-        self.callback = callback
+    def __init__(self, schema, model_dir):
+        self.schema = schema
+        self.model_dir = model_dir
 
-        graph = tf.Graph()
-        with graph.as_default():
-            with tf.variable_scope("inputs"):
-                self.is_train = tf.placeholder(tf.bool, None)
-                # user data
-                self.query_movie_ids = tf.placeholder(tf.int32, [None, None])
-                self.query_movie_ids_len = tf.placeholder(tf.int32, [None])
-
-                # item data
-                self.genres = tf.placeholder(tf.int32, [None, None])
-                self.genres_len = tf.placeholder(tf.int32, [None])
-                self.avg_rating = tf.placeholder(tf.float32, [None])
-                self.year = tf.placeholder(tf.float32, [None])
-                self.candidate_movie_id = tf.placeholder(tf.int32, [None])
-                self.rating = tf.placeholder(tf.float32, [None])
-
-            init_fn = tf.glorot_normal_initializer()
-            emb_init_fn = tf.glorot_uniform_initializer()
-            self.b_global = tf.Variable(emb_init_fn(shape=[]), name="b_global")
-            with tf.variable_scope("embedding"):
-                self.w_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.n_items, dim]), name="w_query_movie_ids")
-                self.b_query_movie_ids = tf.Variable(emb_init_fn(shape=[dim]), name="b_query_movie_ids")
-                self.w_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items, dim]), name="w_candidate_movie_id")
-                self.b_candidate_movie_id = tf.Variable(init_fn(shape=[dim + 8 + 2]), name="b_candidate_movie_id")
-                # self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items]), name="b_candidate_movie_id")
-                self.w_genres = tf.Variable(emb_init_fn(shape=[self.n_genres, 8]), name="w_genres")
-
-            with tf.variable_scope("user_encoding"):
-                # query_movie embedding
-                self.emb_query = tf.nn.embedding_lookup(self.w_query_movie_ids, self.query_movie_ids)
-                query_movie_mask = tf.expand_dims(
-                    tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(self.query_movie_ids_len)), 1), -1)
-                self.emb_query = tf.reduce_sum(self.emb_query * query_movie_mask, 1)
-                self.query_bias = tf.matmul(self.emb_query, self.b_query_movie_ids[:, tf.newaxis])
-                self.emb_query = tf.layers.dense(self.emb_query, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_query = tf.layers.dense(self.emb_query, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_query = tf.layers.dense(self.emb_query, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_query = tf.layers.dense(self.emb_query, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
-
-            # encode [item embedding + item metadata]
-            with tf.variable_scope("item_encoding"):
-                # candidate_movie embedding
-                self.candidate_emb = tf.nn.embedding_lookup(self.w_candidate_movie_id, self.candidate_movie_id)
-                # genres embedding
-                self.emb_genres = tf.nn.embedding_lookup(self.w_genres, tf.to_int32(self.genres))
-                genres_mask = tf.expand_dims(
-                    tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(tf.reshape(self.genres_len, [-1]))), 1), -1)
-                self.emb_genres = tf.reduce_sum(self.emb_genres * genres_mask, 1)
-
-                self.emb_item = tf.concat([self.candidate_emb, self.emb_genres, self.avg_rating[:, tf.newaxis], self.year[:, tf.newaxis]], 1)
-                self.candidate_bias = tf.matmul(self.emb_item, self.b_candidate_movie_id[:, tf.newaxis])
-                self.emb_item = tf.layers.dense(self.emb_item, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_item = tf.layers.dense(self.emb_item, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_item = tf.layers.dense(self.emb_item, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
-                self.emb_item = tf.layers.dense(self.emb_item, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
-
-            # elements wise dot of user and item embedding
-            with tf.variable_scope("gmf"):
-                self.gmf = tf.reduce_sum(self.emb_query * self.emb_item, 1, keep_dims=True)
-                self.gmf = tf.add(self.gmf, self.b_global)
-                self.gmf = tf.add(self.gmf, self.query_bias)
-                self.gmf = tf.add(self.gmf, self.candidate_bias, name="infer")
-
-                # one query for all items, for predict speed
-                self.pred = tf.matmul(self.emb_query, tf.transpose(self.emb_item)) + \
-                            tf.reshape(self.candidate_bias, (1, -1)) + \
-                            self.query_bias + \
-                            self.b_global
-                self.pred = tf.nn.sigmoid(self.pred)
-
-            with tf.variable_scope("loss"):
-                self.alter_rating = tf.to_float(self.rating >= 4)[:, tf.newaxis]
-                self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.alter_rating, logits=self.gmf))
-
-            with tf.variable_scope("train"):
-                self.train_op = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
-                # self.train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(self.loss)
-                pass
-
-            self.saver = tf.train.Saver(tf.global_variables())
-            self.graph = graph
-            self.model_dir = model_dir
+    def graph(self):
+        tf.estimator.Estimator()
 
     def reset_model(self, model_dir):
         shutil.rmtree(path=model_dir, ignore_errors=True)
