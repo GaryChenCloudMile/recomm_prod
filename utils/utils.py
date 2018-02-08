@@ -1,4 +1,5 @@
 import numpy as np, pandas as pd, pickle, json, yaml, re, codecs, os
+import tensorflow as tf
 
 from io import StringIO
 from datetime import datetime
@@ -57,7 +58,7 @@ def dump_pickle(fpath, obj):
 
 
 from collections import Counter
-def split_ratings(data, pos_thres=4, testRatio=0.3):
+def split_by_ratio(data, pos_thres=4, testRatio=0.3):
     """依照比例切割train test資料"""
     tr, te = [], []
     for u, df in data.groupby("userId"):
@@ -84,7 +85,7 @@ def doMovies(movies):
     genresMap = Counter()
     movies.genres.map(genresMap.update)
     om = CatgMapper().fit([e[0] for e in genresMap.most_common()])
-    movies["genres"] = movies.genres.map(lambda lst: [om.enc[e] for e in lst])
+    movies["genres"] = movies.genres.map(lambda lst: [om.enc_[e] for e in lst])
     return movies, om
 
 
@@ -176,6 +177,14 @@ def rm_quiet(fpath):
     if fpath is not None and os.path.exists(fpath) and os.path.isfile(fpath):
         os.remove(fpath)
 
+def to_dense(sp):
+    dense = tf.sparse_to_dense(sp.indices, sp.dense_shape, sp.values, '')
+    return tf.reshape(tf.to_int32(tf.string_to_number(dense)), [-1])
+
+def to_sparse(dense):
+    idx = tf.where(tf.not_equal(dense, 0))
+    return tf.SparseTensor(indices=idx, dense_shape=dense.get_shape(), values=tf.gather_nd(dense, idx))
+
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):
     def init_check(self):
@@ -195,7 +204,7 @@ class BaseMapper(BaseEstimator, TransformerMixin):
 
     def inverse_transform(self, y):
         x = pd.Series(y).map(self.inv_enc_)
-        return x.where(x.notnull(), None)
+        return x.where(x.notnull(), None).values
 
     @staticmethod
     def unserialize(cls, fp):

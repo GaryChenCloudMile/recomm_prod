@@ -36,7 +36,9 @@ class Schema(object):
     TYPE = 'type'
     COL_STATE = 'col_state'
 
-    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI, SEP, VOCABS, VOCABS_PATH, AUX, TYPE, COL_STATE]
+    COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI,
+                SEP, VOCABS, VOCABS_PATH, AUX, TYPE,
+                COL_STATE]
 
     def __init__(self, conf_path, parsed_conf_path, raw_paths:list):
         """Schema configs
@@ -56,6 +58,10 @@ class Schema(object):
         self.col_states_ = None
 
     @property
+    def raw_cols(self):
+        return self.df_conf_.index.tolist()
+
+    @property
     def cols(self):
         return list(self.col_states_.keys())
 
@@ -71,10 +77,18 @@ class Schema(object):
     def label(self):
         return self.df_conf_.query("{} == '{}'".format(Schema.TYPE, Schema.LABEL)).id.tolist()
 
-    def init(self):
-        return self.extract(self.parse_conf()).check().fit()
+    @property
+    def tensor_type(self):
+        dtypes = OrderedDict()
+        df_conf = self.df_conf_.query("{}.notnull()".format(Schema.TYPE))
+        for _, r in df_conf.iterrows():
+            dtypes[r[Schema.ID]] = tf.int32 if r[Schema.M_DTYPE] == Schema.CATG else tf.float32
+        return dtypes
 
-    def parse_conf(self):
+    def init(self):
+        return self.extract(self.read_conf()).check().fit()
+
+    def read_conf(self):
         # TODO: wait for fetch gcs config file and read ...
         import codecs
         with codecs.open(self.conf_path, 'r', encoding='utf-8') as r:
@@ -111,7 +125,6 @@ class Schema(object):
 
         :return: self
         """
-
         # check if basic attr exists
         df_conf = self.df_conf_.query("type.notnull()")
         base = df_conf.query("{}.isnull() or {}.isnull()".format(Schema.ID, Schema.M_DTYPE))
@@ -141,6 +154,24 @@ class Schema(object):
                               .format(Schema.M_DTYPE, Schema.DATETIME, Schema.DATE_FORMAT))
         assert len(dt_no_format) == 0, '{} column expect {} attr, check following:\n{}' \
             .format(Schema.DATETIME, Schema.DATE_FORMAT, dt_no_format)
+
+        # inference whether to add auxiliary col, like sequence, weighted columns
+        return self.check_aux()
+
+    def check_aux(self):
+        # need_aux = self.df_conf_.query("{}.notnull() and {} == '{}' and {} == True" \
+        #                         .format(Schema.TYPE, Schema.M_DTYPE, Schema.CATG, Schema.IS_MULTI))
+        # # print('need_aux', need_aux)
+        # for id, r in need_aux.iterrows():
+        #     # COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI,
+        #     #             SEP, VOCABS, VOCABS_PATH, AUX, TYPE,
+        #     #             COL_STATE]
+        #     self.df_conf_ = self.df_conf_.append({Schema.ID: '{}_len'.format(id),
+        #                                           Schema.M_DTYPE: Schema.CONT,
+        #                                           Schema.IS_MULTI: False,
+        #                                           Schema.AUX: True,
+        #                                           Schema.TYPE: Schema.AUX}, ignore_index=True)
+        # self.df_conf_ = self.df_conf_.where(self.df_conf_.notnull(), None).set_index('id', drop=False)
         return self
 
     def check_catg(self, df_conf):
@@ -188,13 +219,16 @@ class Schema(object):
                 continue
 
             for chunk in pd.read_csv(fpath,
-                                     names=df_conf[Schema.ID].values,
-                                     chunksize=10000, dtype=dtype):
+                                     names=self.raw_cols,
+                                     chunksize=20000, dtype=dtype):
 
                 chunk = chunk.where(pd.notnull(chunk), None)
                 # loop all valid columns except label
                 for _, r in df_conf.iterrows():
                     val, m_dtype, name, col_type = None, r[Schema.M_DTYPE], r[Schema.ID], r[Schema.TYPE]
+                    is_aux = r[Schema.AUX]
+
+                    if is_aux: continue
 
                     if col_type == Schema.LABEL:
                         if name not in col_states:
@@ -243,7 +277,7 @@ class Schema(object):
                 self.count_ += len(chunk)
 
         self.col_states_ = col_states
-        valid_cond = self.df_conf_[Schema.TYPE].notnull()
+        valid_cond = self.df_conf_[Schema.TYPE].notnull() & (self.df_conf_[Schema.AUX] == False)
         # serialize parsed column states
         def ser(id):
             sio = StringIO()
@@ -295,21 +329,21 @@ class Schema(object):
                     Schema.DATETIME: utils.DatetimeMapper}
 
         this.col_states_ = OrderedDict()
-        for _, r in this.df_conf_.query("type.notnull()").iterrows():
+        for _, r in this.df_conf_.query('{}.notnull() and {} == False'\
+                                 .format(Schema.TYPE, Schema.AUX)).iterrows():
             this.col_states_[r[Schema.ID]] = \
                 utils.BaseMapper.unserialize(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
         return this
 
-# class Conf(
-#     collections.namedtuple("Conf",
-#                            ("initializer", "source", "target_input",
-#                             "target_output", "source_sequence_length",
-#                             "target_sequence_length"))):
-#     pass
-
 
 class Loader(object):
     def __init__(self, conf_path, parsed_conf_path, raw_paths:list=None):
+        """
+
+        :param conf_path:
+        :param parsed_conf_path:
+        :param raw_paths:
+        """
         self.conf_path = conf_path
         self.parsed_conf_path = parsed_conf_path
         self.raw_paths = raw_paths
@@ -341,7 +375,7 @@ class Loader(object):
 
         # TODO: alter print function to logging
         print('try to transform {} ... '.format(src_path))
-        self._transform(src_path, tgt_path, chunksize=chunksize, valid_size=valid_size)
+        return self._transform(src_path, tgt_path, chunksize=chunksize, valid_size=valid_size)
 
     def _transform(self, src_path, tgt_path, chunksize=20000, valid_size=None):
         tr_tgt_path = '{}.tr'.format(tgt_path)
@@ -388,107 +422,178 @@ class Loader(object):
                     tr_chunk.to_csv(trw, **kws)
                     vl_chunk.to_csv(vlw, **kws)
                     pos = end_pos
-                # hack
-                break
 
             # TODO: alter print function to logging
             print('[{}]: process take time {}'.format(src_path, datetime.now() - s))
         finally:
             _ = trw.close() if trw is not None else None
             _ = vlw.close() if vlw is not None else None
-
-class ModelMfDNN(object):
-    def __init__(self, schema, model_dir):
-        self.schema = schema
-        self.model_dir = model_dir
-
-    def graph(self):
-        tf.estimator.Estimator()
-
-    def reset_model(self, model_dir):
-        shutil.rmtree(path=model_dir, ignore_errors=True)
-        os.makedirs(model_dir)
-
-    def feed_dict(self, data, mode="train"):
-        ret = {
-            self.query_movie_ids: data["query_movie_ids"],
-            self.query_movie_ids_len: data["query_movie_ids_len"],
-            self.genres: data["genres"],
-            self.genres_len: data["genres_len"],
-            self.avg_rating: data["avg_rating"],
-            self.year: data["year"],
-            self.candidate_movie_id: data["candidate_movie_id"]
-        }
-        ret[self.is_train] = False
-        if mode != "infer":
-            ret[self.rating] = data["rating"]
-            if mode == "train":
-                ret[self.is_train] = True
-            elif mode == "eval":
-                pass
-        return ret
-
-    def fit(self, sess, trainGen, testGen, reset=False, n_epoch=50):
-        sess.run(tf.global_variables_initializer())
-        if reset:
-            print("reset model: clean model dir: {} ...".format(self.model_dir))
-            self.reset_model(self.model_dir)
-        # try: 試著重上次儲存的model再次training
-        self.ckpt(sess, self.model_dir)
-
-        start = time.time()
-        print("%s\t%s\t%s\t%s" % ("Epoch", "Train Error", "Val Error", "Elapsed Time"))
-        minLoss = 1e7
-        for ep in range(1, n_epoch + 1):
-            tr_loss, tr_total = 0, 0
-            for i, data in enumerate(trainGen(), 1):
-                loss, _ = sess.run([self.loss, self.train_op], feed_dict=self.feed_dict(data, mode="train"))
-                batch_len = len(data["query_movie_ids"])
-                tr_loss += loss * batch_len
-                tr_total += batch_len
-                print("\rtrain loss: {:.3f}".format(loss), end="")
-
-            if testGen is not None:
-                te_loss = self.epoch_loss(sess, testGen)
-
-            tpl = "\r%02d\t%.3f\t\t%.3f\t\t%.3f secs"
-            if minLoss > te_loss:
-                tpl += ", saving ..."
-                self.saver.save(sess, os.path.join(self.model_dir, 'model'), global_step=ep)
-                minLoss = te_loss
-
-            end = time.time()
-            print(tpl % (ep, tr_loss / tr_total, te_loss, end - start))
-            start = end
         return self
 
-    def ckpt(self, sess, model_dir):
-        """load latest saved model"""
-        latestCkpt = tf.train.latest_checkpoint(model_dir)
-        if latestCkpt:
-            self.saver.restore(sess, latestCkpt)
-        return latestCkpt
+class ModelMfDNN(object):
+    def __init__(self,
+                 schema,
+                 n_items,
+                 n_genres,
+                 model_dir,
+                 dim=32):
+        self.n_items = n_items
+        self.n_genres = n_genres
+        self.model_dir = model_dir
+        self.dim = dim
+        self.schema = schema
 
-    def epoch_loss(self, sess, data_gen):
-        tot_loss, tot_cnt = 0, 0
-        for data in data_gen():
-            loss_tensor = self.loss
-            loss = sess.run(loss_tensor, feed_dict=self.feed_dict(data, mode="eval"))
-            tot_loss += loss * len(data["query_movie_ids"])
-            tot_cnt += len(data["query_movie_ids"])
-        return tot_loss / tot_cnt
+    def graph(self, features, labels, mode):
+        with tf.variable_scope("inputs"):
+            self.is_train = tf.placeholder(tf.bool, None)
+            self.features, self.labels = features, labels
+            for name, tensor in self.features.items():
+                setattr(self, name, tensor)
+
+        init_fn = tf.glorot_normal_initializer()
+        emb_init_fn = tf.glorot_uniform_initializer()
+        self.b_global = tf.Variable(emb_init_fn(shape=[]), name="b_global")
+
+        with tf.variable_scope("embedding") as scope:
+            self.w_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.n_items, self.dim]), name="w_query_movie_ids")
+            self.b_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.dim]), name="b_query_movie_ids")
+            self.w_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items, self.dim]), name="w_candidate_movie_id")
+            self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.dim + 8 + 2]), name="b_candidate_movie_id")
+            # self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items]), name="b_candidate_movie_id")
+            self.w_genres = tf.Variable(emb_init_fn(shape=[self.n_genres, 8]), name="w_genres")
+
+        with tf.variable_scope("user_encoding") as scope:
+            # query_movie embedding
+            self.emb_query = tf.nn.embedding_lookup(self.w_query_movie_ids, self.query_movie_ids)
+            query_movie_mask = tf.expand_dims(
+                tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(self.query_movie_ids_len)), 1), -1)
+            self.emb_query = tf.reduce_sum(self.emb_query * query_movie_mask, 1)
+            self.query_bias = tf.matmul(self.emb_query, self.b_query_movie_ids[:, tf.newaxis])
+            self.emb_query = tf.layers.dense(self.emb_query, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_query = tf.layers.dense(self.emb_query, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_query = tf.layers.dense(self.emb_query, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_query = tf.layers.dense(self.emb_query, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
+
+        # encode [item embedding + item metadata]
+        with tf.variable_scope("item_encoding") as scope:
+            # candidate_movie embedding
+            self.candidate_emb = tf.nn.embedding_lookup(self.w_candidate_movie_id, self.candidate_movie_id)
+            # genres embedding
+            self.emb_genres = tf.nn.embedding_lookup(self.w_genres, tf.to_int32(self.genres))
+            genres_mask = tf.expand_dims(
+                tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(tf.reshape(self.genres_len, [-1]))), 1), -1)
+            self.emb_genres = tf.reduce_sum(self.emb_genres * genres_mask, 1)
+
+            self.emb_item = tf.concat([self.candidate_emb, self.emb_genres, self.avg_rating[:, tf.newaxis], self.year[:, tf.newaxis]], 1)
+            self.candidate_bias = tf.matmul(self.emb_item, self.b_candidate_movie_id[:, tf.newaxis])
+            self.emb_item = tf.layers.dense(self.emb_item, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_item = tf.layers.dense(self.emb_item, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_item = tf.layers.dense(self.emb_item, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
+            self.emb_item = tf.layers.dense(self.emb_item, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
+
+        # elements wise dot of user and item embedding
+        with tf.variable_scope("gmf") as scope:
+            self.gmf = tf.reduce_sum(self.emb_query * self.emb_item, 1, keepdims=True)
+            self.gmf = tf.add(self.gmf, self.b_global)
+            self.gmf = tf.add(self.gmf, self.query_bias)
+            self.gmf = tf.add(self.gmf, self.candidate_bias, name="infer")
+
+            # one query for all items, for predict speed
+            self.pred = tf.matmul(self.emb_query, tf.transpose(self.emb_item)) + \
+                        tf.reshape(self.candidate_bias, (1, -1)) + \
+                        self.query_bias + \
+                        self.b_global
+            self.pred = tf.nn.sigmoid(self.pred)
+
+        # hack
+        # print('self.features.keys:', features.keys())
+        # print('self.gmf:', self.gmf)
+        # print('self.labels[:, tf.newaxis]:', self.labels[:, tf.newaxis])
+
+        # Provide an estimator spec for `ModeKeys.PREDICT`
+        if mode == tf.estimator.ModeKeys.PREDICT:
+            # export_outputs = {
+            #     'predictions': tf.estimator.export.PredictOutput(self.pred)
+            # }
+            return tf.estimator.EstimatorSpec(mode=mode, predictions=self.pred)
+
+        with tf.variable_scope("loss") as scope:
+            # self.alter_rating = tf.to_float(self.label >= 4)[:, tf.newaxis]
+            self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.to_float(self.labels)[:, tf.newaxis], logits=self.gmf))
+
+        self.train_op = None
+        self.global_step = tf.train.get_or_create_global_step()
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            with tf.variable_scope("train"):
+                update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+                with tf.control_dependencies(update_ops):
+                    self.train_op = tf.train.AdamOptimizer(0.005).minimize(self.loss, self.global_step)
+                    # self.train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(self.loss)
+
+        # self.saver = tf.train.Saver(tf.global_variables())
+        # self.graph = graph
+        # self.model_dir = model_dir
+        return tf.estimator.EstimatorSpec(
+            mode=mode,
+            loss=self.loss,
+            train_op=self.train_op,
+            eval_metric_ops=None)
+
+    def input_fn(self, filenames, n_batch=128, n_epoch=10, shuffle=True):
+        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id', 'rating']
+        defaults = [[''], [''], [], [], [0], [0]]
+        multi_cols = ('query_movie_ids', 'genres')
+
+        def _input_fn():
+            def parse_csv(value):
+                data = tf.decode_csv(value, record_defaults=defaults)
+                features = OrderedDict(zip(cols, data))
+                for col in multi_cols:
+                    features[col] = tf.string_to_number(
+                        tf.string_split([features[col]], ',').values, out_type=tf.int32)
+                return features
+
+            def add_seq_cols(feat):
+                for m_col in multi_cols:
+                    name = '{}_len'.format(m_col)
+                    feat[name] = tf.size(feat[m_col])
+                    cols.append(name)
+                return feat
+
+            dataset = tf.data.TextLineDataset(filenames)
+            dataset = dataset.map(parse_csv, num_parallel_calls=4)
+            dataset = dataset.map(add_seq_cols, num_parallel_calls=4)
+            dataset = dataset.padded_batch(n_batch, OrderedDict(zip(cols, ([None], [None], [], [], [], [], [], [], []))))
+            dataset = dataset.shuffle(n_batch * 1000, seed=seed).repeat(n_epoch)
+            features = dataset.make_one_shot_iterator().get_next()
+            return features, features.pop('rating')
+        return _input_fn
+
+    def serving_inputs(self):
+        placeholders = OrderedDict()
+        for name, tensor in self.features.items():
+            placeholders[name] = tf.placeholder(shape=tensor.get_shape().as_list(), dtype=tensor.dtype)
+
+        placeholders['labels'] = self.labels
+        return tf.estimator.export.ServingInputReceiver(self.features, placeholders)
+
+
+    def fit(self, train_input=None, valid_input=None):
+        train_input = self.input_fn(['./movielens.tr'])
+        valid_input = self.input_fn(['./movielens.vl'], n_epoch=1, shuffle=False)
+        train_spec = tf.estimator.TrainSpec(train_input, max_steps=(69717 // 128) + 1)
+        exporter = tf.estimator.FinalExporter('movielens_export', self.serving_inputs)
+        eval_spec = tf.estimator.EvalSpec(valid_input,
+                                           steps=(30287 // 128) + 1,
+                                           exporters=[exporter],
+                                           name='movielens_eval')
+
+        config = tf.estimator.RunConfig(tf_random_seed=seed)
+        self.estimator_ = tf.estimator.Estimator(model_fn=self.graph, model_dir=self.model_dir, config=config)
+
+        tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
+        return self
 
     def predict(self, sess, user_queries, items):
-        self.ckpt(sess, self.model_dir)
-        return sess.run(self.pred, feed_dict={
-            self.is_train: False,
-            self.query_movie_ids: user_queries["query_movie_ids"],
-            self.query_movie_ids_len: user_queries["query_movie_ids_len"],
-
-            self.genres: items["genres"],
-            self.genres_len: items["genres_len"],
-            self.avg_rating: items["avg_rating"],
-            self.year: items["year"],
-            self.candidate_movie_id: items["candidate_movie_id"]
-        })
+        pass
 

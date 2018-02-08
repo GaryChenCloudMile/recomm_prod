@@ -1,0 +1,19 @@
+columns:
+    - {id: user_id, m_dtype: catg}
+    - {id: query_movie_ids, m_dtype: catg, is_multi: true, sep: ',', vocabs_path: 'item.vocab'}
+    - {id: genres, m_dtype: catg, is_multi: true, sep: '|', vocabs_path: 'genres.vocab'}
+    - {id: avg_rating, m_dtype: cont}
+    - {id: year, m_dtype: cont}
+    - {id: candidate_movie_id, m_dtype: catg, vocabs_path: 'item.vocab'}
+    - {id: timestamp, m_dtype: datetime, date_format: '%Y-%m-%d %H:%M:%S'}
+    - {id: rating, m_dtype: catg}
+
+label:
+    - rating
+user:
+    - query_movie_ids
+item:
+    - genres
+    - avg_rating
+    - year
+    - candidate_movie_id
