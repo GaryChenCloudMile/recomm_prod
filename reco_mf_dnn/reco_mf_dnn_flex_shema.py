@@ -493,7 +493,7 @@ class ModelMfDNN(object):
 
         # elements wise dot of user and item embedding
         with tf.variable_scope("gmf") as scope:
-            self.gmf = tf.reduce_sum(self.emb_query * self.emb_item, 1, keepdims=True)
+            self.gmf = tf.reduce_sum(self.emb_query * self.emb_item, 1, keep_dims=True)
             self.gmf = tf.add(self.gmf, self.b_global)
             self.gmf = tf.add(self.gmf, self.query_bias)
             self.gmf = tf.add(self.gmf, self.candidate_bias, name="infer")
@@ -578,17 +578,21 @@ class ModelMfDNN(object):
         return tf.estimator.export.ServingInputReceiver(self.features, placeholders)
 
 
-    def fit(self, train_input=None, valid_input=None):
+    def fit(self, train_input=None, valid_input=None, reset=True):
+        if reset:
+            print(self.model_dir)
+            shutil.rmtree(self.model_dir)
+
         train_input = self.input_fn(['./movielens.tr'])
         valid_input = self.input_fn(['./movielens.vl'], n_epoch=1, shuffle=False)
-        train_spec = tf.estimator.TrainSpec(train_input, max_steps=(69717 // 128) + 1)
+        train_spec = tf.estimator.TrainSpec(train_input)
         exporter = tf.estimator.FinalExporter('movielens_export', self.serving_inputs)
         eval_spec = tf.estimator.EvalSpec(valid_input,
-                                           steps=(30287 // 128) + 1,
+                                           # steps=(30287 // 128) + 1,
                                            exporters=[exporter],
                                            name='movielens_eval')
 
-        config = tf.estimator.RunConfig(tf_random_seed=seed)
+        config = tf.estimator.RunConfig(tf_random_seed=seed, save_checkpoints_steps=(69717 // 128) + 1)
         self.estimator_ = tf.estimator.Estimator(model_fn=self.graph, model_dir=self.model_dir, config=config)
 
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
