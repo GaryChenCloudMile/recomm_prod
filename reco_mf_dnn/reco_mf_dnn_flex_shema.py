@@ -40,18 +40,17 @@ class Schema(object):
                 SEP, VOCABS, VOCABS_PATH, AUX, TYPE,
                 COL_STATE]
 
-    def __init__(self, conf_path, parsed_conf_path, raw_paths:list):
+    def __init__(self, conf_path, raw_paths:list):
         """Schema configs
 
         :param conf_path: path for config file columns specs configurations
-        :param parsed_conf_path: path for parsed config file configurations
         :param raw_paths: multiple raw training csv files
         """
         self.conf_path = conf_path
-        self.parsed_conf_path = parsed_conf_path
         # TODO: wait for fetch GCS training data to parse
         self.raw_paths = raw_paths
 
+        self.parsed_conf_path_ = '{}.parsed'.format(conf_path)
         self.count_ = 0
         self.conf_ = None
         self.df_conf_ = None
@@ -288,7 +287,7 @@ class Schema(object):
             self.df_conf_.loc[valid_cond, Schema.ID].map(ser)
 
         # serialize to specific path
-        with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
+        with codecs.open(self.parsed_conf_path_, 'w', 'utf-8') as w:
             self.serialize(w)
 
         # output type: catg+multi to str
@@ -302,7 +301,7 @@ class Schema(object):
         """
         return yaml.dump({
             'conf_path': self.conf_path,
-            'parsed_conf_path': self.parsed_conf_path,
+            'parsed_conf_path_': self.parsed_conf_path_,
             'raw_paths': self.raw_paths,
             'count_': self.count_,
             'conf_': self.conf_,
@@ -317,7 +316,7 @@ class Schema(object):
         :return:
         """
         info = yaml.load(fp)
-        this = Schema(info['conf_path'], info['parsed_conf_path'], info['raw_paths'])
+        this = Schema(info['conf_path'], info['raw_paths'])
         for k, attr in info.items():
             setattr(this, k, attr)
 
@@ -436,31 +435,32 @@ class ModelMfDNN(object):
                  n_items,
                  n_genres,
                  model_dir,
-                 dim=32):
+                 hparam):
         self.n_items = n_items
         self.n_genres = n_genres
         self.model_dir = model_dir
-        self.dim = dim
         self.schema = schema
+        self.hparam = hparam
 
-    def graph(self, features, labels, mode):
-        with tf.variable_scope("inputs"):
-            self.is_train = tf.placeholder(tf.bool, None)
+    def graphing(self, features, labels, mode):
+        p = self.hparam
+        with tf.variable_scope('inputs') as scope:
             self.features, self.labels = features, labels
             for name, tensor in self.features.items():
                 setattr(self, name, tensor)
 
-        init_fn = tf.glorot_normal_initializer()
-        emb_init_fn = tf.glorot_uniform_initializer()
-        self.b_global = tf.Variable(emb_init_fn(shape=[]), name="b_global")
+        with tf.variable_scope("init") as scope:
+            init_fn = tf.glorot_normal_initializer()
+            emb_init_fn = tf.glorot_uniform_initializer()
+            self.b_global = tf.Variable(emb_init_fn(shape=[]), name="b_global")
 
-        with tf.variable_scope("embedding") as scope:
-            self.w_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.n_items, self.dim]), name="w_query_movie_ids")
-            self.b_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.dim]), name="b_query_movie_ids")
-            self.w_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items, self.dim]), name="w_candidate_movie_id")
-            self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.dim + 8 + 2]), name="b_candidate_movie_id")
-            # self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items]), name="b_candidate_movie_id")
-            self.w_genres = tf.Variable(emb_init_fn(shape=[self.n_genres, 8]), name="w_genres")
+            with tf.variable_scope("embedding") as scope:
+                self.w_query_movie_ids = tf.Variable(emb_init_fn(shape=[self.n_items, p.dim]), name="w_query_movie_ids")
+                self.b_query_movie_ids = tf.Variable(emb_init_fn(shape=[p.dim]), name="b_query_movie_ids")
+                self.w_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items, p.dim]), name="w_candidate_movie_id")
+                self.b_candidate_movie_id = tf.Variable(init_fn(shape=[p.dim + 8 + 2]), name="b_candidate_movie_id")
+                # self.b_candidate_movie_id = tf.Variable(init_fn(shape=[self.n_items]), name="b_candidate_movie_id")
+                self.w_genres = tf.Variable(emb_init_fn(shape=[self.n_genres, 8]), name="w_genres")
 
         with tf.variable_scope("user_encoding") as scope:
             # query_movie embedding
@@ -472,7 +472,7 @@ class ModelMfDNN(object):
             self.emb_query = tf.layers.dense(self.emb_query, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
             self.emb_query = tf.layers.dense(self.emb_query, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
             self.emb_query = tf.layers.dense(self.emb_query, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
-            self.emb_query = tf.layers.dense(self.emb_query, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
+            # self.emb_query = tf.layers.dense(self.emb_query, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
 
         # encode [item embedding + item metadata]
         with tf.variable_scope("item_encoding") as scope:
@@ -489,7 +489,7 @@ class ModelMfDNN(object):
             self.emb_item = tf.layers.dense(self.emb_item, 128, kernel_initializer=init_fn, activation=tf.nn.selu)
             self.emb_item = tf.layers.dense(self.emb_item, 64, kernel_initializer=init_fn, activation=tf.nn.selu)
             self.emb_item = tf.layers.dense(self.emb_item, 32, kernel_initializer=init_fn, activation=tf.nn.selu)
-            self.emb_item = tf.layers.dense(self.emb_item, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
+            # self.emb_item = tf.layers.dense(self.emb_item, 16, kernel_initializer=init_fn, activation=tf.nn.selu)
 
         # elements wise dot of user and item embedding
         with tf.variable_scope("gmf") as scope:
@@ -505,21 +505,23 @@ class ModelMfDNN(object):
                         self.b_global
             self.pred = tf.nn.sigmoid(self.pred)
 
-        # hack
-        # print('self.features.keys:', features.keys())
-        # print('self.gmf:', self.gmf)
-        # print('self.labels[:, tf.newaxis]:', self.labels[:, tf.newaxis])
-
         # Provide an estimator spec for `ModeKeys.PREDICT`
         if mode == tf.estimator.ModeKeys.PREDICT:
-            # export_outputs = {
-            #     'predictions': tf.estimator.export.PredictOutput(self.pred)
-            # }
-            return tf.estimator.EstimatorSpec(mode=mode, predictions=self.pred)
+            export_outputs = {
+                'predictions': tf.estimator.export.PredictOutput(self.pred)
+            }
+            return tf.estimator.EstimatorSpec(mode=mode,
+                                              predictions=self.pred,
+                                              export_outputs=export_outputs)
 
         with tf.variable_scope("loss") as scope:
             # self.alter_rating = tf.to_float(self.label >= 4)[:, tf.newaxis]
-            self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.to_float(self.labels)[:, tf.newaxis], logits=self.gmf))
+            self.ans = tf.to_float(self.labels)[:, tf.newaxis]
+            self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.ans, logits=self.gmf))
+
+        with tf.variable_scope("metrics") as scope:
+            self.auc = tf.metrics.auc(tf.cast(self.labels, tf.bool),
+                                      tf.reshape(tf.nn.sigmoid(self.gmf), [-1]))
 
         self.train_op = None
         self.global_step = tf.train.get_or_create_global_step()
@@ -527,7 +529,7 @@ class ModelMfDNN(object):
             with tf.variable_scope("train"):
                 update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
                 with tf.control_dependencies(update_ops):
-                    self.train_op = tf.train.AdamOptimizer(0.005).minimize(self.loss, self.global_step)
+                    self.train_op = tf.train.AdamOptimizer().minimize(self.loss, self.global_step)
                     # self.train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(self.loss)
 
         # self.saver = tf.train.Saver(tf.global_variables())
@@ -537,9 +539,9 @@ class ModelMfDNN(object):
             mode=mode,
             loss=self.loss,
             train_op=self.train_op,
-            eval_metric_ops=None)
+            eval_metric_ops={'auc': self.auc})
 
-    def input_fn(self, filenames, n_batch=128, n_epoch=10, shuffle=True):
+    def input_fn(self, filenames, n_batch=128, n_epoch=None, shuffle=True):
         cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id', 'rating']
         defaults = [[''], [''], [], [], [0], [0]]
         multi_cols = ('query_movie_ids', 'genres')
@@ -560,11 +562,14 @@ class ModelMfDNN(object):
                     cols.append(name)
                 return feat
 
+
             dataset = tf.data.TextLineDataset(filenames)
             dataset = dataset.map(parse_csv, num_parallel_calls=4)
             dataset = dataset.map(add_seq_cols, num_parallel_calls=4)
+            if shuffle:
+                dataset = dataset.shuffle(n_batch * 10, seed=seed)
+            dataset = dataset.repeat(n_epoch)
             dataset = dataset.padded_batch(n_batch, OrderedDict(zip(cols, ([None], [None], [], [], [], [], [], [], []))))
-            dataset = dataset.shuffle(n_batch * 1000, seed=seed).repeat(n_epoch)
             features = dataset.make_one_shot_iterator().get_next()
             return features, features.pop('rating')
         return _input_fn
@@ -575,7 +580,7 @@ class ModelMfDNN(object):
             placeholders[name] = tf.placeholder(shape=tensor.get_shape().as_list(), dtype=tensor.dtype)
 
         placeholders['labels'] = self.labels
-        return tf.estimator.export.ServingInputReceiver(self.features, placeholders)
+        return tf.estimator.export.ServingInputReceiver(placeholders, placeholders)
 
 
     def fit(self, train_input=None, valid_input=None, reset=True):
@@ -583,17 +588,21 @@ class ModelMfDNN(object):
             print(self.model_dir)
             shutil.rmtree(self.model_dir)
 
-        train_input = self.input_fn(['./movielens.tr'])
-        valid_input = self.input_fn(['./movielens.vl'], n_epoch=1, shuffle=False)
-        train_spec = tf.estimator.TrainSpec(train_input)
-        exporter = tf.estimator.FinalExporter('movielens_export', self.serving_inputs)
+        p = self.hparam
+        # train_input = self.input_fn([p.train_files], n_epoch=1, n_batch=p.batch_size)
+        # valid_input = self.input_fn([p.eval_files], n_epoch=1, n_batch=p.batch_size, shuffle=False)
+        train_spec = tf.estimator.TrainSpec(train_input, max_steps=p.train_steps)
+        exporter = tf.estimator.FinalExporter(p.export_name, self.serving_inputs)
         eval_spec = tf.estimator.EvalSpec(valid_input,
-                                           # steps=(30287 // 128) + 1,
+                                           steps=p.eval_steps,
                                            exporters=[exporter],
-                                           name='movielens_eval')
+                                           name=p.eval_name)
 
-        config = tf.estimator.RunConfig(tf_random_seed=seed, save_checkpoints_steps=(69717 // 128) + 1)
-        self.estimator_ = tf.estimator.Estimator(model_fn=self.graph, model_dir=self.model_dir, config=config)
+        config = tf.estimator.RunConfig(
+            log_step_count_steps=300,
+            tf_random_seed=seed,
+            save_checkpoints_steps=p.save_every_steps)
+        self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=config)
 
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
         return self

@@ -229,6 +229,17 @@ class CatgMapper(BaseMapper):
         self.enc_ = None
         self.inv_enc_ = None
 
+    @property
+    def n_unique(self):
+        return len(self.classes_)
+
+    @property
+    def emb_size(self):
+        bins = np.array([8, 16, 32])
+        dim_map = dict(zip(range(len(bins)), bins))
+        log_n_uniq = np.log(len(self.classes_))
+        return dim_map[int(np.digitize(log_n_uniq, bins))]
+
     def init_check(self):
         if self.vocabs is not None and self.vocabs_path is not None:
             raise ValueError("[{}]: choose either vocab or vocab_path, can't specified both"
