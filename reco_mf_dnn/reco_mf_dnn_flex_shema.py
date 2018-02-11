@@ -532,9 +532,6 @@ class ModelMfDNN(object):
                     self.train_op = tf.train.AdamOptimizer().minimize(self.loss, self.global_step)
                     # self.train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(self.loss)
 
-        # self.saver = tf.train.Saver(tf.global_variables())
-        # self.graph = graph
-        # self.model_dir = model_dir
         return tf.estimator.EstimatorSpec(
             mode=mode,
             loss=self.loss,
@@ -561,7 +558,6 @@ class ModelMfDNN(object):
                     feat[name] = tf.size(feat[m_col])
                     cols.append(name)
                 return feat
-
 
             dataset = tf.data.TextLineDataset(filenames)
             dataset = dataset.map(parse_csv, num_parallel_calls=4)

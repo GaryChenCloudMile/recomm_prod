@@ -1,18 +1,18 @@
-gcs: D:/Python/notebook/recomm_prod/repo
+gcs: H:/workspace/notebook/recomm_prod/repo
 project_id: foo
-raw_dir: 'D:/Python/notebook/recomm_prod/data/foo/user_supplied/raws'
+raw_dir: 'H:/workspace/notebook/recomm_prod/data/foo/user_supplied/raws'
 override: true
 
 columns:
     - {id: user_id, m_dtype: catg}
     - {id: query_movie_ids, m_dtype: catg, is_multi: true, sep: ',',
-       vocabs_path: 'D:/Python/notebook/recomm_prod/data/project_id/user_supplied/item.vocab'}
+       vocabs_path: 'H:/workspace/notebook/recomm_prod/repo/data/project_id/user_supplied/item.vocab'}
     - {id: genres, m_dtype: catg, is_multi: true, sep: '|',
-       vocabs_path: 'D:/Python/notebook/recomm_prod/data/project_id/user_supplied/genres.vocab'}
+       vocabs_path: 'H:/workspace/notebook/recomm_prod/repo/data/project_id/user_supplied/genres.vocab'}
     - {id: avg_rating, m_dtype: cont}
     - {id: year, m_dtype: cont}
     - {id: candidate_movie_id, m_dtype: catg,
-       vocabs_path: 'D:/Python/notebook/recomm_prod/data/project_id/user_supplied/item.vocab'}
+       vocabs_path: 'H:/workspace/notebook/recomm_prod/repo/data/project_id/user_supplied/item.vocab'}
     - {id: timestamp, m_dtype: datetime, date_format: '%Y-%m-%d %H:%M:%S'}
     - {id: rating, m_dtype: catg}
 

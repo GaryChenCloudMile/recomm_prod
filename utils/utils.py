@@ -235,7 +235,7 @@ class CatgMapper(BaseMapper):
 
     @property
     def emb_size(self):
-        bins = np.array([8, 16, 32])
+        bins = np.array([8, 16, 32, 64])
         dim_map = dict(zip(range(len(bins)), bins))
         log_n_uniq = np.log(len(self.classes_))
         return dim_map[int(np.digitize(log_n_uniq, bins))]

@@ -1,6 +1,11 @@
+import os
+
 # recommendation engine service GCS path
-GCS = 'D:/Python/notebook/recomm_prod'
+GCS = 'D:/Python/notebook/recomm_prod/repo'
 
-DATA_PATH = '/'.join([GCS, 'data'])
+DATA = 'data'
 
-MODEL_PATH = '/'.join([GCS, 'model'])
+MODEL = 'model'
+
+TRAIN_FNAME = 'data.tr'
+VALID_FNAME = 'data.tr'
