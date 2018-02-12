@@ -1,4 +1,4 @@
-import numpy as np, tensorflow as tf, os, time, pandas as pd, codecs, yaml, shutil
+import numpy as np, tensorflow as tf, os, time, pandas as pd, codecs, yaml, shutil, traceback
 
 from datetime import datetime
 from io import StringIO
@@ -50,11 +50,13 @@ class Schema(object):
         # TODO: wait for fetch GCS training data to parse
         self.raw_paths = raw_paths
 
-        self.parsed_conf_path_ = '{}.parsed'.format(conf_path)
+        # self.parsed_conf_path_ = '{}.parsed'.format(conf_path)
         self.count_ = 0
         self.conf_ = None
         self.df_conf_ = None
         self.col_states_ = None
+        self.tr_count_ = None
+        self.vl_count_ = None
 
     @property
     def raw_cols(self):
@@ -286,11 +288,63 @@ class Schema(object):
         self.df_conf_.loc[valid_cond, 'col_state'] = \
             self.df_conf_.loc[valid_cond, Schema.ID].map(ser)
 
-        # serialize to specific path
-        with codecs.open(self.parsed_conf_path_, 'w', 'utf-8') as w:
-            self.serialize(w)
-
         # output type: catg+multi to str
+        return self
+
+    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path, chunksize=20000, valid_size=None):
+        # tr_tgt_path = '{}.tr'.format(tgt_path)
+        # vl_tgt_path = '{}.vl'.format(tgt_path)
+        # delete first
+        for file2del in (tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
+        # if not split, discard vl_tgt_path variable
+        # if not valid_size:
+        #     tr_tgt_path = tgt_path
+
+        df_conf = self.df_conf_
+        dtype = self.raw_dtype(df_conf)
+        columns = df_conf[Schema.ID].values
+        col_states = self.col_states_
+        pos = 0
+
+        trw, vlw, rand_seq = codecs.open(tr_tgt_path, 'a', 'utf-8'), None, None
+        if valid_size:
+            rand_seq = np.random.random(size=self.count_)
+            vlw = codecs.open(vl_tgt_path, 'a', 'utf-8')
+            self.tr_count_ = int(sum(rand_seq > valid_size))
+            self.vl_count_ = int(sum(rand_seq <= valid_size))
+        try:
+            s = datetime.now()
+            for fpath in src_path:
+                for chunk in pd.read_csv(fpath, names=columns, chunksize=chunksize, dtype=dtype):
+                    chunk = chunk.where(pd.notnull(chunk), None)[self.cols]
+                    for colname, col in chunk.iteritems():
+                        # multivalent categorical columns
+                        if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
+                                df_conf.loc[colname, Schema.IS_MULTI]:
+                            val = pd.Series(col_states[colname].transform(col))
+                            # because of persist to csv, transfer int array to string splitted by comma
+                            chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
+                        # univalent columns
+                        else:
+                            chunk[colname] = list(col_states[colname].transform(col))
+
+                    kws = {'index': False, 'header': None}
+                    if not valid_size:
+                        chunk.to_csv(trw, **kws)
+                    else:
+                        end_pos = pos + len(chunk)
+                        rand_batch = rand_seq[pos:end_pos]
+                        # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
+                        tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
+                        tr_chunk.to_csv(trw, **kws)
+                        vl_chunk.to_csv(vlw, **kws)
+                        pos = end_pos
+
+                # TODO: alter print function to logging
+                print('[{}]: process take time {}'.format(fpath, datetime.now() - s))
+        finally:
+            _ = trw.close() if trw is not None else None
+            _ = vlw.close() if vlw is not None else None
         return self
 
     def serialize(self, fp):
@@ -301,9 +355,11 @@ class Schema(object):
         """
         return yaml.dump({
             'conf_path': self.conf_path,
-            'parsed_conf_path_': self.parsed_conf_path_,
+            # 'parsed_conf_path_': self.parsed_conf_path_,
             'raw_paths': self.raw_paths,
             'count_': self.count_,
+            'tr_count_': self.tr_count_,
+            'vl_count_': self.vl_count_,
             'conf_': self.conf_,
             'df_conf_': self.df_conf_.to_dict(orient='records'),
         }, fp)
@@ -361,10 +417,13 @@ class Loader(object):
             else:
                 # TODO: alter print function to logging
                 print('try to parse {} (user supplied) ...'.format(self.conf_path))
-                self.schema = Schema(self.conf_path, self.parsed_conf_path, self.raw_paths).init()
+                self.schema = Schema(self.conf_path, self.raw_paths).init()
+                # serialize to specific path
+                # with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
+                #     self.schema.serialize(w)
         return self
 
-    def tansform(self, src_path, tgt_path, chunksize=20000, reset=False, valid_size=None):
+    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path, chunksize=20000, reset=False, valid_size=None):
         # reset: remove parsed config file and rebuild
         if reset:
             self.schema = None
@@ -374,73 +433,23 @@ class Loader(object):
 
         # TODO: alter print function to logging
         print('try to transform {} ... '.format(src_path))
-        return self._transform(src_path, tgt_path, chunksize=chunksize, valid_size=valid_size)
-
-    def _transform(self, src_path, tgt_path, chunksize=20000, valid_size=None):
-        tr_tgt_path = '{}.tr'.format(tgt_path)
-        vl_tgt_path = '{}.vl'.format(tgt_path)
-        # delete first
-        for file2del in (tgt_path, tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
-        # if don't split, discard vl_tgt_path variable
-        if not valid_size:
-            tr_tgt_path = tgt_path
-
-        df_conf = self.schema.df_conf_
-        dtype = self.schema.raw_dtype(df_conf)
-        columns = df_conf[Schema.ID].values
-        col_states = self.schema.col_states_
-        pos = 0
-
-        trw, vlw, rand_seq = codecs.open(tr_tgt_path, 'a', 'utf-8'), None, None
-        if valid_size:
-            rand_seq = np.random.random(size=self.schema.count_)
-            vlw = codecs.open(vl_tgt_path, 'a', 'utf-8')
-        try:
-            s = datetime.now()
-            for step, chunk in enumerate(pd.read_csv(src_path, names=columns, chunksize=chunksize, dtype=dtype), 1):
-                chunk = chunk.where(pd.notnull(chunk), None)[self.schema.cols]
-                for colname, col in chunk.iteritems():
-                    # multivalent categorical columns
-                    if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
-                       df_conf.loc[colname, Schema.IS_MULTI]:
-                        val = pd.Series(col_states[colname].transform(col))
-                        # because of persist to csv, transfer int array to string splitted by comma
-                        chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
-                    # univalent columns
-                    else:
-                        chunk[colname] = list(col_states[colname].transform(col))
-
-                kws = {'index': False, 'header': None}
-                if not valid_size:
-                    chunk.to_csv(trw, **kws)
-                else:
-                    end_pos = pos + len(chunk)
-                    rand_batch = rand_seq[pos:end_pos]
-                    # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
-                    tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
-                    tr_chunk.to_csv(trw, **kws)
-                    vl_chunk.to_csv(vlw, **kws)
-                    pos = end_pos
-
-            # TODO: alter print function to logging
-            print('[{}]: process take time {}'.format(src_path, datetime.now() - s))
-        finally:
-            _ = trw.close() if trw is not None else None
-            _ = vlw.close() if vlw is not None else None
+        self.schema.transform(src_path, tr_tgt_path, vl_tgt_path, chunksize=chunksize, valid_size=valid_size)
+        # serialize to specific path
+        with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
+            self.schema.serialize(w)
         return self
 
 class ModelMfDNN(object):
     def __init__(self,
-                 schema,
-                 n_items,
-                 n_genres,
-                 model_dir,
-                 hparam):
+                 hparam=None,
+                 schema=None,
+                 n_items=None,
+                 n_genres=None):
         self.n_items = n_items
         self.n_genres = n_genres
-        self.model_dir = model_dir
         self.schema = schema
         self.hparam = hparam
+        self.model_dir = hparam.job_dir
 
     def graphing(self, features, labels, mode):
         p = self.hparam
@@ -508,7 +517,11 @@ class ModelMfDNN(object):
         # Provide an estimator spec for `ModeKeys.PREDICT`
         if mode == tf.estimator.ModeKeys.PREDICT:
             export_outputs = {
-                'predictions': tf.estimator.export.PredictOutput(self.pred)
+                'outputs': tf.estimator.export.PredictOutput({
+                    'emb_query': self.emb_query,
+                    'emb_item': self.emb_item,
+                    'pred': self.pred
+                })
             }
             return tf.estimator.EstimatorSpec(mode=mode,
                                               predictions=self.pred,
@@ -518,6 +531,7 @@ class ModelMfDNN(object):
             # self.alter_rating = tf.to_float(self.label >= 4)[:, tf.newaxis]
             self.ans = tf.to_float(self.labels)[:, tf.newaxis]
             self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.ans, logits=self.gmf))
+            tf.summary.scalar('loss_hist'.format(scope), self.loss)
 
         with tf.variable_scope("metrics") as scope:
             self.auc = tf.metrics.auc(tf.cast(self.labels, tf.bool),
@@ -531,7 +545,7 @@ class ModelMfDNN(object):
                 with tf.control_dependencies(update_ops):
                     self.train_op = tf.train.AdamOptimizer().minimize(self.loss, self.global_step)
                     # self.train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(self.loss)
-
+        # self.merge = tf.summary.merge_all()
         return tf.estimator.EstimatorSpec(
             mode=mode,
             loss=self.loss,
@@ -581,23 +595,31 @@ class ModelMfDNN(object):
 
     def fit(self, train_input=None, valid_input=None, reset=True):
         if reset:
-            print(self.model_dir)
-            shutil.rmtree(self.model_dir)
+            # TODO:
+            print('clear checkpoint directory {}'.format(self.model_dir))
+            shutil.rmtree(self.model_dir, ignore_errors=True)
 
         p = self.hparam
-        # train_input = self.input_fn([p.train_files], n_epoch=1, n_batch=p.batch_size)
-        # valid_input = self.input_fn([p.eval_files], n_epoch=1, n_batch=p.batch_size, shuffle=False)
-        train_spec = tf.estimator.TrainSpec(train_input, max_steps=p.train_steps)
+
+        # summary_hook = tf.train.SummarySaverHook(
+        #     100, output_dir=self.model_dir, summary_op=tf.train.Scaffold(summary_op=tf.summary.merge_all()))
+        train_spec = tf.estimator.TrainSpec(train_input, max_steps=p.train_steps, hooks=None)
         exporter = tf.estimator.FinalExporter(p.export_name, self.serving_inputs)
         eval_spec = tf.estimator.EvalSpec(valid_input,
                                            steps=p.eval_steps,
                                            exporters=[exporter],
                                            name=p.eval_name)
+        # try to build local export directory avoid error
+        try:
+            os.makedirs( os.path.join(self.model_dir, 'export', p.export_name) )
+        except:
+            print( traceback.format_exc() )
 
         config = tf.estimator.RunConfig(
             log_step_count_steps=300,
             tf_random_seed=seed,
-            save_checkpoints_steps=p.save_every_steps)
+            save_checkpoints_steps=p.eval_steps,
+            model_dir=self.model_dir)
         self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=config)
 
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
