@@ -100,27 +100,33 @@ class Ctrl(object):
                 schema = self.service.unser_parsed_conf(p.parsed_conf_path)
 
             p.add_hparam('export_name', 'export_{}'.format(p.pid))
-            p.add_hparam('eval_name', 'eval_{}'.format(p.pid))
+            p.add_hparam('eval_name', '{}'.format(p.pid))
             p.add_hparam('n_batch', 128)
 
             ## runtime calculating attrs
             # training about 10 epochs
-            # hack, just train one epoch
-            p.add_hparam('train_steps', schema.tr_count_ // p.n_batch)
-            # p.add_hparam('train_steps', (schema.tr_count_ // p.n_batch) * 10)
-            p.add_hparam('eval_steps', schema.vl_count_ // p.n_batch)
+            tr_steps = self.count_steps(schema.tr_count_, p.n_batch)
+            vl_steps = self.count_steps(schema.vl_count_, p.n_batch)
+            p.add_hparam('train_steps', tr_steps * 3)
+            p.add_hparam('eval_steps', vl_steps)
             p.add_hparam('dim', 16)
-            p.add_hparam('save_every_steps', p.eval_steps)
+            # save once per epoch
+            p.add_hparam('save_every_steps', None)
             model = self.service.train(p, schema)
 
             ret[env.ERR_CDE] = 00
+            return model
         except Exception as e:
             ret[env.ERR_CDE] = 99
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
         finally:
             pass
+
         return ret
+
+    def count_steps(self, n_total, n_batch):
+        return n_total // n_batch + (1 if n_total % n_batch else 0)
 
 
 
