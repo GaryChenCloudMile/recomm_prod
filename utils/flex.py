@@ -1,4 +1,4 @@
-import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf
+import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, env
 
 from io import StringIO
 from datetime import datetime
@@ -70,6 +70,11 @@ class Schema(object):
     @property
     def item_cols(self):
         return self.df_conf_.query("{} == '{}'".format(Schema.TYPE, Schema.ITEM)).id.tolist()
+
+    @property
+    def features(self):
+        label = self.label[0]
+        return list(e for e in self.cols if e != label)
 
     @property
     def label(self):
@@ -400,6 +405,7 @@ class Loader(object):
         self.parsed_conf_path = parsed_conf_path
         self.raw_paths = raw_paths
         self.schema = None
+        self.logger = env.logger('Loader')
 
     def check_schema(self):
         # init schema
@@ -407,13 +413,13 @@ class Loader(object):
             # 1. try unserialize
             if os.path.isfile(self.parsed_conf_path):
                 # TODO: alter print function to logging
-                print('try to unserialize from {}'.format(self.parsed_conf_path))
+                self.logger.info('try to unserialize from {}'.format(self.parsed_conf_path))
                 with codecs.open(self.parsed_conf_path, 'r', 'utf-8') as r:
                     self.schema = Schema.unserialize(r)
             # 2. if parsed_conf_path not exists, try re-parse raw config file (conf_path supplied by user)
             else:
                 # TODO: alter print function to logging
-                print('try to parse {} (user supplied) ...'.format(self.conf_path))
+                self.logger.info('try to parse {} (user supplied) ...'.format(self.conf_path))
                 self.schema = Schema(self.conf_path, self.raw_paths).init()
                 # serialize to specific path
                 # with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
@@ -429,7 +435,7 @@ class Loader(object):
         self.check_schema()
 
         # TODO: alter print function to logging
-        print('try to transform {} ... '.format(src_path))
+        self.logger.info('try to transform {} ... '.format(src_path))
         self.schema.transform(src_path, tr_tgt_path, vl_tgt_path, chunksize=chunksize, valid_size=valid_size)
         # serialize to specific path
         with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:

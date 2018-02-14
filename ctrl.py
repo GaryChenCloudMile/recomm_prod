@@ -10,45 +10,42 @@ class Ctrl(object):
     RAW_DIR = 'raw_dir'
     OVERRIDE = 'override'
     GCS = 'gcs'
+    PARSED_FNAME = 'parsed.yaml'
 
     def __init__(self):
         self.service = service.Service()
-        self.logger = env.logger(__name__)
+        self.logger = env.logger('Ctrl')
 
-    def pre_action(self, params):
+    def pre_action(self, params, is_train=False):
         conf = self.service.read_user_conf(params.conf_path)
         p = HParams(conf_path=params.conf_path,
                     pid=conf[Ctrl.PROJECT_ID],
                     raw_dir=conf[Ctrl.RAW_DIR],
                     override=True if conf.get(Ctrl.OVERRIDE) else False)
-        self.check_project(p, conf)
-
-        p.add_hparam('train_file', os.path.join(p.repo, env.DATA, env.TRAIN_FNAME))
-        p.add_hparam('valid_file', os.path.join(p.repo, env.DATA, env.VALID_FNAME))
-        p.add_hparam('parsed_conf_path',
-                     os.path.join(p.data_dir, 'parsed_{}'.format(os.path.basename(p.conf_path))))
-        return p
-
-    def check_project(self, p, conf):
-        # TODO: change to GCS style
-        # central repo
-        # p.add_hparam('repo', os.path.join(env.GCS))
-
-        # individual gcs from clients
-        p.add_hparam('repo', os.path.join(conf[Ctrl.GCS], p.pid))
-        # p.add_hparam('log_dir', os.path.join(p.repo, env.LOG))
-        # self.logger = env.logger(p.pid)
-        if not p.override and os.path.exists(p.repo):
-            print('project id [{}] exists, put [override: true] in config file for overriding!'
-                  .format(p.pid))
-            return self
-
-        p.add_hparam('job_dir', os.path.join(p.repo, env.MODEL))
-        p.add_hparam('data_dir', os.path.join(p.repo, env.DATA))
+        self.check_project(p, conf, is_train=is_train)
 
         os.makedirs(p.job_dir, exist_ok=True)
         os.makedirs(p.data_dir, exist_ok=True)
-        # os.makedirs(p.log_dir, exist_ok=True)
+        p.add_hparam('train_file', os.path.join(p.repo, env.DATA, env.TRAIN_FNAME))
+        p.add_hparam('valid_file', os.path.join(p.repo, env.DATA, env.VALID_FNAME))
+        return p
+
+    def check_project(self, p, conf=None, is_train=False):
+        # TODO: change to GCS style
+        # central repo
+        p.add_hparam('repo', os.path.join(env.GCS, p.pid))
+
+        # individual gcs from clients
+        # p.add_hparam('repo', os.path.join(conf[Ctrl.GCS], p.pid))
+        # p.add_hparam('log_dir', os.path.join(p.repo, env.LOG))
+        # self.logger = env.logger(p.pid)
+        if is_train and not p.override and os.path.exists(p.repo):
+            raise Exception('project id [{}] exists, put [override: true] in config file for overriding!'
+                            .format(p.pid))
+
+        p.add_hparam('job_dir', os.path.join(p.repo, env.MODEL))
+        p.add_hparam('data_dir', os.path.join(p.repo, env.DATA))
+        p.add_hparam('parsed_conf_path', os.path.join(p.data_dir, Ctrl.PARSED_FNAME))
         return self
 
     def gen_data(self, params):
@@ -79,7 +76,7 @@ class Ctrl(object):
         """
         ret = {}
         try:
-            p = self.pre_action(params)
+            p = self.pre_action(params, is_train=True)
             schema = None
             try:
                 # TODO:
@@ -88,7 +85,8 @@ class Ctrl(object):
 
                 for trf in (p.train_file, p.valid_file):
                     assert os.path.exists(trf), "training file [{}] not found".format(trf)
-            except:
+            except Exception as e:
+                self.logger.warn(e)
                 # try to gen training data
                 # TODO:
                 self.logger.info('{}: try to generate training data...'.format(p.pid))
@@ -125,6 +123,13 @@ class Ctrl(object):
 
         return ret
 
+    def predict(self, params):
+        conf = self.service.read_user_conf(params.conf_path)
+        p = HParams(pid=conf[Ctrl.PROJECT_ID])
+        self.check_project(p)
+        p.add_hparam('parsed_conf_path', os.path.join(p.data_dir, Ctrl.PARSED_FNAME))
+
+
     def count_steps(self, n_total, n_batch):
         return n_total // n_batch + (1 if n_total % n_batch else 0)
 
@@ -140,5 +145,4 @@ if __name__ == '__main__':
         help='config path in user\'s GCS',
     )
 
-    params = HParams(**parser.parse_args().__dict__)
-    Ctrl.instance.process(params)
+    Ctrl.instance.train(parser.parse_args())

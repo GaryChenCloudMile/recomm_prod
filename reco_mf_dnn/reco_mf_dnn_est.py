@@ -179,7 +179,8 @@ class ModelMfDNN(object):
                                           steps=p.eval_steps,
                                           exporters=[exporter],
                                           name=p.eval_name,
-                                          throttle_secs=20)
+                                          # throttle_secs=26
+                                         )
         # try to build local export directory avoid error
         # TODO:
         try:
@@ -193,6 +194,17 @@ class ModelMfDNN(object):
 
     def predict(self, sess, user_queries, items):
         pass
+
+
+class MyHook(tf.train.SessionRunHook):
+    def __init__(self, tensor):
+        self.tensor = tensor
+
+    def before_run(self, run_context):
+        return tf.train.SessionRunArgs(self.tensor)
+
+    def after_run(self, run_context, run_values):
+        print(len(run_values.results))
 
 class BestScoreExporter(tf.estimator.Exporter):
     def __init__(self,
@@ -215,13 +227,10 @@ class BestScoreExporter(tf.estimator.Exporter):
     def export(self, estimator, export_path, checkpoint_path, eval_result,
              is_the_final_export):
 
-        for arg in (estimator, export_path, checkpoint_path, eval_result, is_the_final_export):
-            print(arg)
-
         curloss = eval_result['loss']
         if self.best is None or self.best >= curloss:
             self.best = curloss
-            print('nice eval loss: {}'.format(curloss))
+            self.logger.info('nice eval loss: {}, export to pb'.format(curloss))
             estimator.export_savedmodel(
                 export_path,
                 self.serving_input_receiver_fn,
@@ -229,4 +238,4 @@ class BestScoreExporter(tf.estimator.Exporter):
                 as_text=self.as_text,
                 checkpoint_path=checkpoint_path)
         else:
-            print('bad eval loss: {}'.format(curloss))
+            self.logger.info('bad eval loss: {}'.format(curloss))

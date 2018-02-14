@@ -8,7 +8,7 @@ seed = 88
 class Service(object):
 
     def __init__(self):
-        self.logger = env.logger(__name__)
+        self.logger = env.logger('Service')
 
     def read_user_conf(self, conf_path):
         with codecs.open(conf_path, 'r', 'utf-8') as r:
@@ -37,7 +37,7 @@ class Service(object):
         return loader.schema
 
     def train(self, p, schema):
-        # hack
+        # TODO: hack
         from pprint import pprint
         from io import StringIO
         sio = StringIO()
@@ -45,8 +45,8 @@ class Service(object):
         self.logger.info('hparam: {}'.format(sio.getvalue()))
 
         model = est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
-        train_input = model.input_fn([p.train_file], n_epoch=None, n_batch=p.n_batch)
-        valid_input = model.input_fn([p.valid_file], n_epoch=None, n_batch=p.n_batch, shuffle=False)
+        train_input = model.input_fn([p.train_file], n_epoch=1, n_batch=p.n_batch)
+        valid_input = model.input_fn([p.valid_file], n_epoch=1, n_batch=p.n_batch, shuffle=False)
         run_config = tf.estimator.RunConfig(
             log_step_count_steps=100,
             tf_random_seed=seed,
