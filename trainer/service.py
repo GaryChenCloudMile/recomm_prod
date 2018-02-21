@@ -1,7 +1,7 @@
-import yaml, codecs, os, env, tensorflow as tf
+import yaml, codecs, os, env, tensorflow as tf, json, reco_mf_dnn_est as est
 
-from reco_mf_dnn import reco_mf_dnn_est as est
-from utils import flex
+from datetime import datetime
+from utils import flex, utils
 
 seed = 88
 
@@ -55,3 +55,24 @@ class Service(object):
 
         model.fit(train_input, valid_input, run_config, reset=True)
         return model
+
+    def predict(self, p):
+        self.logger.info('predict.params: {}'.format(p.values()))
+        loader = flex.Loader(p.conf_path, p.parsed_conf_path)
+        # transform data to model recognizable
+        data = loader.trans_json(p.data)
+        # hack
+        # for k, v, in data.items():
+        #     if k in ('query_movie_ids', 'genres '):
+        #         print(k, type(v[0][0]))
+
+        # ml-engine local predict
+        tmpfile = 'tmp.{}.json'.format(datetime.now().strftime('%Y%m%d%H%M%S%f'))
+        with codecs.open(tmpfile, 'w', 'utf-8') as w:
+            json.dump(data, w)
+
+        command = ('gcloud ml-engine local predict'
+                   ' --model-dir D:/Python/notebook/recomm_prod/repo/foo/model_1518581106.1947258/export/export_foo/1518581138'
+                   ' --json-instances {}'.format(tmpfile))
+        self.logger.info(command)
+        utils.cmd(command)

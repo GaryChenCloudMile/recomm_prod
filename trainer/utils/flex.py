@@ -1,4 +1,4 @@
-import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, env
+import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, env, json
 
 from io import StringIO
 from datetime import datetime
@@ -293,14 +293,9 @@ class Schema(object):
         # output type: catg+multi to str
         return self
 
-    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path, chunksize=20000, valid_size=None):
-        # tr_tgt_path = '{}.tr'.format(tgt_path)
-        # vl_tgt_path = '{}.vl'.format(tgt_path)
+    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path=None, valid_size=None, chunksize=20000):
         # delete first
         for file2del in (tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
-        # if not split, discard vl_tgt_path variable
-        # if not valid_size:
-        #     tr_tgt_path = tgt_path
 
         df_conf = self.df_conf_
         dtype = self.raw_dtype(df_conf)
@@ -441,3 +436,24 @@ class Loader(object):
         with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
             self.schema.serialize(w)
         return self
+
+    def trans_json(self, data):
+        self.check_schema()
+
+        self.logger.info('try to restful transform ... ')
+        # json path to read
+        if isinstance(data, str):
+            with codecs.open(data, 'r', 'utf-8') as r:
+                data = json.load(r)
+        else:
+            data = data.copy()
+
+        ret = {}
+        df_conf = self.schema.df_conf_
+        col_states = self.schema.col_states_
+        # loop parsed feature columns, cause maybe there're some noise columns in data
+        for colname in self.schema.features:
+            ret[colname] = col_states[colname].transform(data[colname]).tolist()
+        return ret
+
+

@@ -1,5 +1,6 @@
-import argparse, env, os, service, traceback
+import argparse, env, os, service, time
 
+from utils import utils
 from datetime import datetime
 from tensorflow.contrib.training.python.training.hparam import HParams
 
@@ -124,14 +125,40 @@ class Ctrl(object):
         return ret
 
     def predict(self, params):
+        ret = {}
         conf = self.service.read_user_conf(params.conf_path)
-        p = HParams(pid=conf[Ctrl.PROJECT_ID])
-        self.check_project(p)
-        p.add_hparam('parsed_conf_path', os.path.join(p.data_dir, Ctrl.PARSED_FNAME))
+        p = HParams(pid=conf[Ctrl.PROJECT_ID], conf_path=params.conf_path, data=params.data)
+        s = datetime.now()
+        try:
+            self.check_project(p)
+            # TODO: GCS check if parsed conf path exists
+            assert os.path.exists(p.parsed_conf_path), "can't find schema cause {} not exists" \
+                .format(p.parsed_conf_path)
 
+            ret['response'] = self.service.predict(p)
+            ret[env.ERR_CDE] = 00
+        except Exception as e:
+            ret[env.ERR_CDE] = 99
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+            # raise Exception(e)
+        finally:
+            # TODO:
+            self.logger.info('{}: predict take time {}'.format(p.pid, datetime.now() - s))
+        return ret
 
     def count_steps(self, n_total, n_batch):
         return n_total // n_batch + (1 if n_total % n_batch else 0)
+
+    def cmd(self, params):
+        utils.cmd('gcloud ml-engine local predict'
+                  ' --model_dir D:/Python/notebook/recomm_prod/repo/foo/model_1518581106.1947258/export/export_foo/1518581138'
+                  ' --json-instance ')
+
+    def cmd2(self, params):
+        for i in range(1, 4):
+            time.sleep(1)
+            self.logger.info(i)
 
 
 
@@ -141,8 +168,14 @@ Ctrl.instance = Ctrl()
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        '--method',
+        help='execution method',
+    )
+    parser.add_argument(
         '--conf-path',
         help='config path in user\'s GCS',
     )
+    args = parser.parse_args()
 
-    Ctrl.instance.train(parser.parse_args())
+    exec = getattr(Ctrl.instance, args.method)
+    exec(args)

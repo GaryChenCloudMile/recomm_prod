@@ -185,6 +185,14 @@ def to_sparse(dense):
     idx = tf.where(tf.not_equal(dense, 0))
     return tf.SparseTensor(indices=idx, dense_shape=dense.get_shape(), values=tf.gather_nd(dense, idx))
 
+def cmd(commands):
+    import subprocess
+
+    proc = subprocess.Popen(commands, shell=True, stdout=subprocess.PIPE)
+    while proc.poll() is None:
+        output = proc.stdout.readline()
+        print(output.decode('utf-8'), end='')
+
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):
     def init_check(self):
@@ -323,7 +331,7 @@ class CatgMapper(BaseMapper):
             concat = pd.Series(np.concatenate(x.values))
             concat = do_default(concat)
             x = concat.map(self.enc_).fillna(0).astype(int).values
-            return pd.Series(np.split(x, lens)[:-1]).map(list).values
+            return pd.Series(np.split(x, lens)[:-1]).map(lambda x: x.tolist()).values
         else:
             y = do_default(y)
             return y.map(self.enc_).fillna(0).astype(int).values
