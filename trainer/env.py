@@ -1,7 +1,8 @@
 import os, yaml, logging, logging.config, codecs
 
 # recommendation engine service GCS path
-GCS = 'D:/Python/notebook/recomm_prod/repo'
+# GCS = 'D:/Python/notebook/recomm_prod/repo'
+GCS = 'gs://recomm-job'
 
 DATA = 'data'
 MODEL = 'model'
@@ -20,6 +21,8 @@ class Logging(object):
     @staticmethod
     def logger(name):
         if Logging.instance is None:
+            log_conf = 'gs://recomm-job/log/logging.yaml'
+
             with codecs.open(os.path.join(os.path.dirname(__file__), 'logging.yaml'), 'r', 'utf-8') as r:
                 logging.config.dictConfig(yaml.load(r))
             Logging.instance = logging

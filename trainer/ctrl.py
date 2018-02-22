@@ -1,6 +1,7 @@
-import argparse, env, os, service, time
+import argparse, os, time, yaml
 
-from utils import utils
+from . import service, env
+from .utils import utils
 from datetime import datetime
 from tensorflow.contrib.training.python.training.hparam import HParams
 
@@ -25,6 +26,7 @@ class Ctrl(object):
                     override=True if conf.get(Ctrl.OVERRIDE) else False)
         self.check_project(p, conf, is_train=is_train)
 
+        # TODO
         os.makedirs(p.job_dir, exist_ok=True)
         os.makedirs(p.data_dir, exist_ok=True)
         p.add_hparam('train_file', os.path.join(p.repo, env.DATA, env.TRAIN_FNAME))
@@ -66,6 +68,46 @@ class Ctrl(object):
             # TODO:
             self.logger.info('{}: gen_data take time {}'.format(p.pid, datetime.now() - s))
         return ret
+
+    def train_submit(self, params):
+        from oauth2client.client import GoogleCredentials
+        from googleapiclient import discovery
+
+        ctx = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        authpath = os.path.join(ctx, 'auth.json')
+
+        project = 'training-recommendation-engine'
+
+        svc = discovery.build('ml', 'v1', credentials=GoogleCredentials.from_stream(authpath))
+        commands = """
+            cd {} && \
+            gcloud ml-engine jobs submit training recomm_movielens_16 \
+                --job-dir gs://recomm-job/foo/model \
+                --runtime-version 1.4 \
+                --module-name trainer.ctrl \
+                --package-path trainer \
+                --region asia-east1 \
+                --config config.yaml \
+                -- \
+                --method train \
+                --conf-path gs://recomm-job/foo/data/user_supplied/movielens.yaml
+        """.strip().format(ctx)
+        # resp = svc.projects().jobs()\
+        #           .create(parent='projects/{}'.format(project),
+        #                   body={
+        #                       'jobId': 'recomm_movielens_16',
+        #                       'trainingInput': {
+        #                           'pythonModule': 'trainer.ctrl',
+        #                           'region': 'asia-east1',
+        #                           'jobDir': 'gs://recomm-job/foo/model',
+        #                           'packageUris': 'recomm-job/foo/model/packages/{}/package-0.0.0.tar.gz'.format(utils.timestamp()),
+        #                           'runtimeVersion': '1.4',
+        #                           'pythonVersion': '3.5'
+        #                       }
+        #                   })\
+        #           .execute()
+        return utils.cmd(commands)
+
 
     def train(self, params):
         """do model ml-engine traning
@@ -150,6 +192,9 @@ class Ctrl(object):
     def count_steps(self, n_total, n_batch):
         return n_total // n_batch + (1 if n_total % n_batch else 0)
 
+    def test(self, params):
+        print(env, service, utils)
+
     def cmd(self, params):
         utils.cmd('gcloud ml-engine local predict'
                   ' --model_dir D:/Python/notebook/recomm_prod/repo/foo/model_1518581106.1947258/export/export_foo/1518581138'
@@ -175,7 +220,11 @@ if __name__ == '__main__':
         '--conf-path',
         help='config path in user\'s GCS',
     )
+    parser.add_argument(
+        '--job-dir',
+        help='where to put checkpoints',
+    )
     args = parser.parse_args()
 
-    exec = getattr(Ctrl.instance, args.method)
-    exec(args)
+    execution = getattr(Ctrl.instance, args.method)
+    execution(args)

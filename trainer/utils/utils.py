@@ -188,10 +188,22 @@ def to_sparse(dense):
 def cmd(commands):
     import subprocess
 
-    proc = subprocess.Popen(commands, shell=True, stdout=subprocess.PIPE)
+    proc = subprocess.Popen(commands, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    outs = []
     while proc.poll() is None:
         output = proc.stdout.readline()
-        print(output.decode('utf-8'), end='')
+        decode = None
+        for encode in ('utf-8', 'big5'):
+            try:
+                decode = output.decode(encode)
+            except:
+                pass
+        assert decode is not None, 'decode failed!'
+        outs.append(decode)
+    return ''.join(outs)
+
+def timestamp():
+    return datetime.now().strftime('%Y%m%d%H%M%S%f')
 
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):

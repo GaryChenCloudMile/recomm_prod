@@ -1,5 +1,5 @@
-import numpy as np, tensorflow as tf, os, time, pandas as pd, codecs, yaml, shutil, traceback
-import env, time
+import tensorflow as tf, os, time, traceback
+import trainer.env as env
 
 from collections import OrderedDict
 

@@ -1,8 +1,10 @@
-import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, env, json
+import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, json
 
+from .. import env
+from . import utils
 from io import StringIO
 from datetime import datetime
-from utils import utils
+
 from collections import OrderedDict
 
 # pd.set_option('display.width', 100)
@@ -429,9 +431,9 @@ class Loader(object):
 
         self.check_schema()
 
-        # TODO: alter print function to logging
         self.logger.info('try to transform {} ... '.format(src_path))
         self.schema.transform(src_path, tr_tgt_path, vl_tgt_path, chunksize=chunksize, valid_size=valid_size)
+        # TODO:
         # serialize to specific path
         with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
             self.schema.serialize(w)

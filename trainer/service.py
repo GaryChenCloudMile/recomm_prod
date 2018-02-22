@@ -1,20 +1,24 @@
-import yaml, codecs, os, env, tensorflow as tf, json, reco_mf_dnn_est as est
+import yaml, codecs, os, tensorflow as tf, json
 
+from . import env
+from . import reco_mf_dnn_est as est
+from .utils import flex, utils
 from datetime import datetime
-from utils import flex, utils
 
 seed = 88
-
 class Service(object):
 
     def __init__(self):
         self.logger = env.logger('Service')
+        self.storage = None
 
-    def read_user_conf(self, conf_path):
+    def read_user_conf(self, conf_path, bucket=None):
+        # TODO
         with codecs.open(conf_path, 'r', 'utf-8') as r:
             return yaml.load(r)
 
     def unser_parsed_conf(self, parsed_conf_path):
+        # TODO
         with codecs.open(parsed_conf_path, 'r', 'utf-8') as r:
             return flex.Schema.unserialize(r)
 
@@ -68,6 +72,7 @@ class Service(object):
 
         # ml-engine local predict
         tmpfile = 'tmp.{}.json'.format(datetime.now().strftime('%Y%m%d%H%M%S%f'))
+        # TODO:
         with codecs.open(tmpfile, 'w', 'utf-8') as w:
             json.dump(data, w)
 
