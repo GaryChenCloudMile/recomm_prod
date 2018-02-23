@@ -205,6 +205,15 @@ def cmd(commands):
 def timestamp():
     return datetime.now().strftime('%Y%m%d%H%M%S%f')
 
+def join(*x, sep='/'):
+    return sep.join(x)
+
+def parse_gsc_uri(s):
+    s = re.sub('(?i)^gs://', '', s)
+    ary = s.split('/')
+    # bucket, suffix
+    return ary[0], '/'.join(ary[1:])
+
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):
     def init_check(self):

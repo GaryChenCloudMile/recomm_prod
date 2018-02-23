@@ -94,10 +94,8 @@ class Schema(object):
         return self.extract(self.read_conf()).check().fit()
 
     def read_conf(self):
-        # TODO: wait for fetch gcs config file and read ...
-        import codecs
-        with codecs.open(self.conf_path, 'r', encoding='utf-8') as r:
-            return r.read()
+        bucket, rest = utils.parse_gsc_uri(self.conf_path)
+        return env.bucket(bucket).get_blob(rest).download_as_string()
 
     def extract(self, conf):
         self.conf_ = yaml.load(conf)
@@ -218,6 +216,7 @@ class Schema(object):
         col_states = OrderedDict()
         # './merged_movielens.csv'
         for fpath in self.raw_paths:
+            utils.parse_gsc_uri(fpath)
             if not os.path.exists(fpath):
                 # TODO: wait for logging object
                 print("{} doesn't exists".format(fpath))
@@ -417,17 +416,15 @@ class Loader(object):
             else:
                 # TODO: alter print function to logging
                 self.logger.info('try to parse {} (user supplied) ...'.format(self.conf_path))
-                self.schema = Schema(self.conf_path, self.raw_paths).init()
-                # serialize to specific path
-                # with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
-                #     self.schema.serialize(w)
+                self.schema = Schema(self.conf_path, self.raw_paths)
+                self.schema.init()
         return self
 
     def transform(self, src_path:list, tr_tgt_path, vl_tgt_path, chunksize=20000, reset=False, valid_size=None):
         # reset: remove parsed config file and rebuild
         if reset:
             self.schema = None
-            utils.rm_quiet(self.parsed_conf_path)
+            # utils.rm_quiet(self.parsed_conf_path)
 
         self.check_schema()
 

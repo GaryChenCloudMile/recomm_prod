@@ -1,9 +1,10 @@
-import yaml, codecs, os, tensorflow as tf, json
+import yaml, codecs, os, tensorflow as tf, json, re
 
 from . import env
 from . import reco_mf_dnn_est as est
 from .utils import flex, utils
 from datetime import datetime
+from io import StringIO
 
 seed = 88
 class Service(object):
@@ -12,10 +13,9 @@ class Service(object):
         self.logger = env.logger('Service')
         self.storage = None
 
-    def read_user_conf(self, conf_path, bucket=None):
-        # TODO
-        with codecs.open(conf_path, 'r', 'utf-8') as r:
-            return yaml.load(r)
+    def read_user_conf(self, conf_path):
+        bucket, rest = utils.parse_gsc_uri(conf_path)
+        return yaml.load(env.bucket(bucket).get_blob(rest).download_as_string())
 
     def unser_parsed_conf(self, parsed_conf_path):
         # TODO
@@ -23,8 +23,9 @@ class Service(object):
             return flex.Schema.unserialize(r)
 
     def find_raws(self, p):
-        # TODO: change to GCS style
-        return [os.path.join(root, f) for root, ds, fs in os.walk(p.raw_dir) for f in fs]
+        client_bucket, prefix = utils.parse_gsc_uri(p.raw_dir)
+        return ['gs://{}/{}'.format(client_bucket, e.name)
+                for e in env.bucket(client_bucket).list_blobs(prefix=prefix)]
 
     def unserialize(self, fp):
         return flex.Schema.unserialize(fp)
@@ -37,8 +38,11 @@ class Service(object):
         loader = flex.Loader(conf_path=p.conf_path,
                               parsed_conf_path=p.parsed_conf_path,
                               raw_paths=p.raw_paths)
-        loader.transform(p.raw_paths, p.train_file, p.valid_file, reset=True, valid_size=.3)
-        return loader.schema
+        # hack
+        loader.check_schema()
+
+        # loader.transform(p.raw_paths, p.train_file, p.valid_file, reset=True, valid_size=.3)
+        # return loader.schema
 
     def train(self, p, schema):
         # TODO: hack
