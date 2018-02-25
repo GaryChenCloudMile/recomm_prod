@@ -52,6 +52,7 @@ class Ctrl(object):
     def gen_data(self, params):
         ret = {}
         s = datetime.now()
+        p = None
         try:
             p = self.pre_action(params)
             self.service.gen_data(p)
@@ -63,7 +64,6 @@ class Ctrl(object):
             self.logger.error(e, exc_info=True)
             # raise Exception(e)
         finally:
-            # TODO:
             self.logger.info('{}: gen_data take time {}'.format(p.pid, datetime.now() - s))
         return ret
 

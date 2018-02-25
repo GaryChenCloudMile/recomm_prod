@@ -38,11 +38,9 @@ class Service(object):
         loader = flex.Loader(conf_path=p.conf_path,
                               parsed_conf_path=p.parsed_conf_path,
                               raw_paths=p.raw_paths)
-        # hack
-        loader.check_schema()
 
-        # loader.transform(p.raw_paths, p.train_file, p.valid_file, reset=True, valid_size=.3)
-        # return loader.schema
+        loader.transform(p.raw_paths, p.train_file, p.valid_file, reset=True, valid_size=.3)
+        return loader.schema
 
     def train(self, p, schema):
         # TODO: hack

@@ -2,7 +2,7 @@ import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, json
 
 from .. import env
 from . import utils
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime
 
 from collections import OrderedDict
@@ -48,6 +48,7 @@ class Schema(object):
         self.conf_path = conf_path
         # TODO: wait for fetch GCS training data to parse
         self.raw_paths = raw_paths
+        self.logger = env.logger('Schema')
 
         # self.parsed_conf_path_ = '{}.parsed'.format(conf_path)
         self.count_ = 0
@@ -216,17 +217,15 @@ class Schema(object):
         col_states = OrderedDict()
         # './merged_movielens.csv'
         for fpath in self.raw_paths:
-            utils.parse_gsc_uri(fpath)
-            if not os.path.exists(fpath):
-                # TODO: wait for logging object
-                print("{} doesn't exists".format(fpath))
+            blob = utils.gcs_blob(fpath)
+            if not blob.exists():
+                self.logger.info("{} doesn't exists".format(fpath))
                 continue
 
-            for chunk in pd.read_csv(fpath,
-                                     names=self.raw_cols,
-                                     chunksize=20000, dtype=dtype):
-
+            bio = BytesIO(blob.download_as_string())
+            for chunk in pd.read_csv(bio, names=self.raw_cols, chunksize=20000, dtype=dtype):
                 chunk = chunk.where(pd.notnull(chunk), None)
+
                 # loop all valid columns except label
                 for _, r in df_conf.iterrows():
                     val, m_dtype, name, col_type = None, r[Schema.M_DTYPE], r[Schema.ID], r[Schema.TYPE]
@@ -295,8 +294,8 @@ class Schema(object):
         return self
 
     def transform(self, src_path:list, tr_tgt_path, vl_tgt_path=None, valid_size=None, chunksize=20000):
-        # delete first
-        for file2del in (tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
+        # delete first, comments this on gcs environment, because it will override automatically
+        # for file2del in (tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
 
         df_conf = self.df_conf_
         dtype = self.raw_dtype(df_conf)
@@ -338,8 +337,7 @@ class Schema(object):
                         vl_chunk.to_csv(vlw, **kws)
                         pos = end_pos
 
-                # TODO: alter print function to logging
-                print('[{}]: process take time {}'.format(fpath, datetime.now() - s))
+                self.logger.info('[{}]: process take time {}'.format(fpath, datetime.now() - s))
         finally:
             _ = trw.close() if trw is not None else None
             _ = vlw.close() if vlw is not None else None
@@ -401,6 +399,7 @@ class Loader(object):
         self.parsed_conf_path = parsed_conf_path
         self.raw_paths = raw_paths
         self.schema = None
+
         self.logger = env.logger('Loader')
 
     def check_schema(self):

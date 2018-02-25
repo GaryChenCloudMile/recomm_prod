@@ -5,6 +5,11 @@ from io import StringIO
 from datetime import datetime
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import MinMaxScaler
+from google.cloud.storage.blob import Blob
+from io import BytesIO, StringIO
+
+from .. import env
+
 
 seed = 88
 np.random.seed(seed)
@@ -214,6 +219,12 @@ def parse_gsc_uri(s):
     # bucket, suffix
     return ary[0], '/'.join(ary[1:])
 
+def gcs_blob(s) -> Blob:
+    bucket, prefix = parse_gsc_uri(s)
+    bucket = env.bucket(bucket)
+    blob = bucket.get_blob(prefix)
+    return blob if blob is not None else Blob(name=prefix, bucket=bucket)
+
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):
     def init_check(self):
@@ -279,12 +290,12 @@ class CatgMapper(BaseMapper):
             self.freeze_ = True
 
         if self.vocabs_path is not None:
-            # TODO: alter to GCS check file
-            assert os.path.exists(self.vocabs_path), "[{}]: can't find vocabs file [{}]"\
+            blob = gcs_blob(self.vocabs_path)
+            assert blob.exists(), "[{}]: can't find vocabs file [{}]"\
                                                       .format(self.name, self.vocabs_path)
-            with codecs.open(self.vocabs_path, 'r', 'utf-8') as r:
-                clazz = pd.Series(r.readlines()).map(str.strip).unique()
-                self.classes_ = list(clazz[clazz != ''])
+            r = StringIO(blob.download_as_string().decode('utf-8'))
+            clazz = pd.Series(r.readlines()).map(str.strip).unique()
+            self.classes_ = list(clazz[clazz != ''])
             self.gen_mapper()
             self.freeze_ = True
         return self
