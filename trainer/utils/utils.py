@@ -216,7 +216,7 @@ def join(*x, sep='/'):
 def parse_gsc_uri(s):
     s = re.sub('(?i)^gs://', '', s)
     ary = s.split('/')
-    # bucket, suffix
+    # bucket, prefix
     return ary[0], '/'.join(ary[1:])
 
 def gcs_blob(s) -> Blob:
@@ -224,6 +224,19 @@ def gcs_blob(s) -> Blob:
     bucket = env.bucket(bucket)
     blob = bucket.get_blob(prefix)
     return blob if blob is not None else Blob(name=prefix, bucket=bucket)
+
+def gcs_clear(dir_):
+    dir_ = gcs_blob(dir_)
+    for blob in dir_.bucket.list_blobs(prefix=dir_.name): blob.delete()
+
+def gcs_rm_quiet(fpath):
+    if fpath is not None:
+        blob = gcs_blob(fpath)
+        _ = blob.delete() if blob.exists() else None
+
+def gcs_list(s):
+    blob = gcs_blob(s)
+    return list(blob.bucket.list_blobs(prefix=blob.name))
 
 from sklearn.base import BaseEstimator, TransformerMixin
 class BaseMapper(BaseEstimator, TransformerMixin):
@@ -252,6 +265,8 @@ class BaseMapper(BaseEstimator, TransformerMixin):
 
 
 class CatgMapper(BaseMapper):
+    logger = env.logger('CatgMapper')
+
     """fit categorical feature"""
     def __init__(self, name=None, allow_null=True,
                  is_multi=False, sep=None, default=None,
@@ -293,6 +308,7 @@ class CatgMapper(BaseMapper):
             blob = gcs_blob(self.vocabs_path)
             assert blob.exists(), "[{}]: can't find vocabs file [{}]"\
                                                       .format(self.name, self.vocabs_path)
+            self.logger.info('[{}] fetch vocab [{}] '.format(self.name, self.vocabs_path))
             r = StringIO(blob.download_as_string().decode('utf-8'))
             clazz = pd.Series(r.readlines()).map(str.strip).unique()
             self.classes_ = list(clazz[clazz != ''])

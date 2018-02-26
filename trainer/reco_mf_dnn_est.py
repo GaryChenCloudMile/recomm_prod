@@ -1,11 +1,14 @@
 import tensorflow as tf, os, time, traceback
-import trainer.env as env
+from . import env
+from .utils import utils
 
 from collections import OrderedDict
 
 seed = 88
 
 class ModelMfDNN(object):
+    logger = env.logger('ModelMfDNN')
+
     def __init__(self,
                  hparam=None,
                  schema=None,
@@ -15,8 +18,8 @@ class ModelMfDNN(object):
         self.n_genres = n_genres
         self.schema = schema
         self.hparam = hparam
-        self.model_dir = hparam.job_dir
-        self.logger = env.logger('ModelMfDNN')
+        if hparam is not None:
+            self.model_dir = hparam.job_dir
 
     def graphing(self, features, labels, mode):
         p = self.hparam
@@ -163,11 +166,9 @@ class ModelMfDNN(object):
 
     def fit(self, train_input, valid_input, run_config, reset=True):
         if reset:
-            # TODO:
             # print('clear checkpoint directory {}'.format(self.model_dir))
             # shutil.rmtree(self.model_dir)
-            self.model_dir = '{}_{}'.format(self.model_dir, time.time())
-            os.makedirs(self.model_dir)
+            utils.gcs_clear(self.model_dir)
 
         p = self.hparam
         # summary_hook = tf.train.SummarySaverHook(
@@ -182,11 +183,10 @@ class ModelMfDNN(object):
                                           # throttle_secs=26
                                          )
         # try to build local export directory avoid error
-        # TODO:
-        try:
-            os.makedirs( os.path.join(self.model_dir, 'export', p.export_name) )
-        except:
-            print( traceback.format_exc() )
+        # try:
+        #     os.makedirs( os.path.join(self.model_dir, 'export', p.export_name) )
+        # except:
+        #     self.logger.error( traceback.format_exc() )
 
         self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=run_config)
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
@@ -207,6 +207,8 @@ class MyHook(tf.train.SessionRunHook):
         print(len(run_values.results))
 
 class BestScoreExporter(tf.estimator.Exporter):
+    logger = env.logger('BestScoreExporter')
+
     def __init__(self,
                  name,
                  serving_input_receiver_fn,
@@ -217,8 +219,7 @@ class BestScoreExporter(tf.estimator.Exporter):
         self.assets_extra = assets_extra
         self.as_text = as_text
         self.best = None
-        self.logger = env.logger('BestScoreExporter')
-        print('BestScoreExporter init')
+        self.logger.info('BestScoreExporter init')
 
     @property
     def name(self):

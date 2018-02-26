@@ -3,6 +3,7 @@ import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, json
 from .. import env
 from . import utils
 from io import StringIO, BytesIO
+from google.cloud.storage.blob import Blob
 from datetime import datetime
 
 from collections import OrderedDict
@@ -38,6 +39,7 @@ class Schema(object):
     COL_ATTR = [ID, M_DTYPE, DATE_FORMAT, DEFAULT, IS_MULTI,
                 SEP, VOCABS, VOCABS_PATH, AUX, TYPE,
                 COL_STATE]
+    logger = env.logger('Schema')
 
     def __init__(self, conf_path, raw_paths:list):
         """Schema configs
@@ -48,7 +50,6 @@ class Schema(object):
         self.conf_path = conf_path
         # TODO: wait for fetch GCS training data to parse
         self.raw_paths = raw_paths
-        self.logger = env.logger('Schema')
 
         # self.parsed_conf_path_ = '{}.parsed'.format(conf_path)
         self.count_ = 0
@@ -293,56 +294,6 @@ class Schema(object):
         # output type: catg+multi to str
         return self
 
-    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path=None, valid_size=None, chunksize=20000):
-        # delete first, comments this on gcs environment, because it will override automatically
-        # for file2del in (tr_tgt_path, vl_tgt_path): utils.rm_quiet(file2del)
-
-        df_conf = self.df_conf_
-        dtype = self.raw_dtype(df_conf)
-        columns = df_conf[Schema.ID].values
-        col_states = self.col_states_
-        pos = 0
-
-        trw, vlw, rand_seq = codecs.open(tr_tgt_path, 'a', 'utf-8'), None, None
-        if valid_size:
-            rand_seq = np.random.random(size=self.count_)
-            vlw = codecs.open(vl_tgt_path, 'a', 'utf-8')
-            self.tr_count_ = int(sum(rand_seq > valid_size))
-            self.vl_count_ = int(sum(rand_seq <= valid_size))
-        try:
-            s = datetime.now()
-            for fpath in src_path:
-                for chunk in pd.read_csv(fpath, names=columns, chunksize=chunksize, dtype=dtype):
-                    chunk = chunk.where(pd.notnull(chunk), None)[self.cols]
-                    for colname, col in chunk.iteritems():
-                        # multivalent categorical columns
-                        if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
-                                df_conf.loc[colname, Schema.IS_MULTI]:
-                            val = pd.Series(col_states[colname].transform(col))
-                            # because of persist to csv, transfer int array to string splitted by comma
-                            chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
-                        # univalent columns
-                        else:
-                            chunk[colname] = list(col_states[colname].transform(col))
-
-                    kws = {'index': False, 'header': None}
-                    if not valid_size:
-                        chunk.to_csv(trw, **kws)
-                    else:
-                        end_pos = pos + len(chunk)
-                        rand_batch = rand_seq[pos:end_pos]
-                        # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
-                        tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
-                        tr_chunk.to_csv(trw, **kws)
-                        vl_chunk.to_csv(vlw, **kws)
-                        pos = end_pos
-
-                self.logger.info('[{}]: process take time {}'.format(fpath, datetime.now() - s))
-        finally:
-            _ = trw.close() if trw is not None else None
-            _ = vlw.close() if vlw is not None else None
-        return self
-
     def serialize(self, fp):
         """
 
@@ -386,8 +337,9 @@ class Schema(object):
                 utils.BaseMapper.unserialize(ser_maps[r[Schema.M_DTYPE]], r[Schema.COL_STATE])
         return this
 
-
 class Loader(object):
+    logger = env.logger('Loader')
+
     def __init__(self, conf_path, parsed_conf_path, raw_paths:list=None):
         """
 
@@ -400,40 +352,100 @@ class Loader(object):
         self.raw_paths = raw_paths
         self.schema = None
 
-        self.logger = env.logger('Loader')
-
     def check_schema(self):
         # init schema
         if self.schema is None:
             # 1. try unserialize
-            if os.path.isfile(self.parsed_conf_path):
-                # TODO: alter print function to logging
+            parsed_conf = utils.gcs_blob(self.parsed_conf_path)
+            if parsed_conf.exists():
+                # if os.path.isfile(self.parsed_conf_path):
                 self.logger.info('try to unserialize from {}'.format(self.parsed_conf_path))
-                with codecs.open(self.parsed_conf_path, 'r', 'utf-8') as r:
-                    self.schema = Schema.unserialize(r)
+                self.schema = Schema.unserialize(BytesIO(parsed_conf.download_as_string()))
             # 2. if parsed_conf_path not exists, try re-parse raw config file (conf_path supplied by user)
             else:
-                # TODO: alter print function to logging
                 self.logger.info('try to parse {} (user supplied) ...'.format(self.conf_path))
                 self.schema = Schema(self.conf_path, self.raw_paths)
                 self.schema.init()
         return self
 
-    def transform(self, src_path:list, tr_tgt_path, vl_tgt_path, chunksize=20000, reset=False, valid_size=None):
+    def transform(self, params, chunksize=20000, reset=False, valid_size=None):
         # reset: remove parsed config file and rebuild
         if reset:
             self.schema = None
-            # utils.rm_quiet(self.parsed_conf_path)
+            utils.gcs_rm_quiet(self.parsed_conf_path)
 
         self.check_schema()
 
-        self.logger.info('try to transform {} ... '.format(src_path))
-        self.schema.transform(src_path, tr_tgt_path, vl_tgt_path, chunksize=chunksize, valid_size=valid_size)
-        # TODO:
+        self.logger.info('try to transform {} ... '.format(params.raw_paths))
+        df_conf = self.schema.df_conf_
+        dtype = self.schema.raw_dtype(df_conf)
+        columns = df_conf[Schema.ID].values
+        col_states = self.schema.col_states_
+        pos = 0
+
+        # make tmp dir
+        tmp_ctx = '/tmp/{}'.format(params.pid)
+        os.makedirs(tmp_ctx, exist_ok=True)
+        trw = codecs.open('{}/data.tr.{}'.format(tmp_ctx, utils.timestamp()), 'w', 'utf-8')
+        vlw, rand_seq = None, None
+        if valid_size:
+            rand_seq = np.random.random(size=self.schema.count_)
+            vlw = codecs.open('{}/data.te.{}'.format(tmp_ctx, utils.timestamp()), 'a', 'utf-8')
+            self.schema.tr_count_ = int(sum(rand_seq > valid_size))
+            self.schema.vl_count_ = int(sum(rand_seq <= valid_size))
+
         # serialize to specific path
-        with codecs.open(self.parsed_conf_path, 'w', 'utf-8') as w:
-            self.schema.serialize(w)
+        stream = StringIO()
+        self.schema.serialize(stream)
+        utils.gcs_blob(self.parsed_conf_path).upload_from_file(BytesIO(stream.getvalue().encode('utf-8')))
+        try:
+            s = datetime.now()
+            for fpath in params.raw_paths:
+                # download bytes from gcs, assume the file size is small
+                # because we suggest split large file into multi chunks in a directory
+                bio = BytesIO(utils.gcs_blob(fpath).download_as_string())
+                for chunk in pd.read_csv(bio, names=columns, chunksize=chunksize, dtype=dtype):
+                    chunk = chunk.where(pd.notnull(chunk), None)[self.schema.cols]
+                    for colname, col in chunk.iteritems():
+                        # multivalent categorical columns
+                        if df_conf.loc[colname, Schema.M_DTYPE] == Schema.CATG and \
+                                df_conf.loc[colname, Schema.IS_MULTI]:
+                            val = pd.Series(col_states[colname].transform(col))
+                            # because of persist to csv, transfer int array to string splitted by comma
+                            chunk[colname] = val.map(lambda ary: ','.join(map(str, ary))).tolist()
+                        # univalent columns
+                        else:
+                            chunk[colname] = list(col_states[colname].transform(col))
+
+                    kws = {'index': False, 'header': None}
+                    if not valid_size:
+                        chunk.to_csv(trw, **kws)
+                    else:
+                        end_pos = pos + len(chunk)
+                        rand_batch = rand_seq[pos:end_pos]
+                        # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
+                        tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
+                        tr_chunk.to_csv(trw, **kws)
+                        vl_chunk.to_csv(vlw, **kws)
+                        pos = end_pos
+
+                e = datetime.now()
+                self.logger.info('[{}]: process take time {}'.format(fpath, e - s))
+                s = e
+        finally:
+            _ = trw.close() if trw is not None else None
+            _ = vlw.close() if vlw is not None else None
+            # write processed training data to gcs
+            self.to_gcs(trw, vlw, params.train_file, params.valid_file)
+
         return self
+
+    def to_gcs(self, trw, vlw, tr_tgt_path, vl_tgt_path):
+        for src, tgt_path in ((trw, tr_tgt_path), (vlw, vl_tgt_path)):
+            if src is not None:
+                self.logger.info('upload [{}] to {}'.format(src.name, tgt_path))
+                with codecs.open(src.name, 'rb') as r:
+                    utils.gcs_blob(tgt_path).upload_from_string(r.read())
 
     def trans_json(self, data):
         self.check_schema()
@@ -441,8 +453,11 @@ class Loader(object):
         self.logger.info('try to restful transform ... ')
         # json path to read
         if isinstance(data, str):
-            with codecs.open(data, 'r', 'utf-8') as r:
-                data = json.load(r)
+            stream = StringIO()
+            utils.gcs_blob(data).download_to_file(stream)
+            data = json.load(stream.getvalue())
+            # with codecs.open(data, 'r', 'utf-8') as r:
+            #     data = json.load(r)
         else:
             data = data.copy()
 

@@ -15,24 +15,12 @@ class Ctrl(object):
     BUCKET = 'bucket'
     PARSED_FNAME = 'parsed.yaml'
 
+    logger = env.logger('Ctrl')
+
     def __init__(self):
         self.service = service.Service()
-        self.logger = env.logger('Ctrl')
 
-    def pre_action(self, params, is_train=False):
-        conf = self.service.read_user_conf(params.conf_path)
-        p = HParams(conf_path=params.conf_path,
-                    pid=conf[Ctrl.PROJECT_ID],
-                    raw_dir=conf[Ctrl.RAW_DIR],
-                    override=True if conf.get(Ctrl.OVERRIDE) else False)
-        self.check_project(p, conf, is_train=is_train)
-
-        p.add_hparam('train_file', utils.join(p.repo, env.DATA, env.TRAIN_FNAME))
-        p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
-        return p
-
-    def check_project(self, p, conf=None, is_train=False):
-        # TODO: change to GCS style
+    def check_project(self, p):
         # central repo
         p.add_hparam('repo', utils.join(env.HQ_BUCKET, p.pid))
 
@@ -46,8 +34,20 @@ class Ctrl(object):
 
         p.add_hparam('job_dir', utils.join(p.repo, env.MODEL))
         p.add_hparam('data_dir', utils.join(p.repo, env.DATA))
-        p.add_hparam('parsed_conf_path', utils.join(p.data_dir, Ctrl.PARSED_FNAME))
+        p.add_hparam('parsed_conf_path', utils.join(p.data_dir, self.PARSED_FNAME))
         return self
+
+    def pre_action(self, params):
+        conf = self.service.read_user_conf(params.conf_path)
+        p = HParams(conf_path=params.conf_path,
+                    pid=conf[self.PROJECT_ID],
+                    raw_dir=conf[self.RAW_DIR],
+                    override=True if conf.get(self.OVERRIDE) else False)
+        self.check_project(p)
+
+        p.add_hparam('train_file', utils.join(p.repo, env.DATA, env.TRAIN_FNAME))
+        p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
+        return p
 
     def gen_data(self, params):
         ret = {}
@@ -57,85 +57,89 @@ class Ctrl(object):
             p = self.pre_action(params)
             self.service.gen_data(p)
 
-            ret[env.ERR_CDE] = 00
+            ret[env.ERR_CDE] = '00'
         except Exception as e:
-            ret[env.ERR_CDE] = 99
+            ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
-            # raise Exception(e)
         finally:
             self.logger.info('{}: gen_data take time {}'.format(p.pid, datetime.now() - s))
         return ret
 
     def train_submit(self, params):
-        from oauth2client.client import GoogleCredentials
-        from googleapiclient import discovery
-
-        ctx = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        authpath = utils.join(ctx, 'auth.json')
-
+        # ctx = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         project = 'training-recommendation-engine'
-
-        svc = discovery.build('ml', 'v1', credentials=GoogleCredentials.from_stream(authpath))
-        commands = """
-            cd {} && \
-            gcloud ml-engine jobs submit training recomm_movielens_16 \
-                --job-dir gs://recomm-job/foo/model \
-                --runtime-version 1.4 \
-                --module-name trainer.ctrl \
-                --package-path trainer \
-                --region asia-east1 \
-                --config config.yaml \
-                -- \
-                --method train \
-                --conf-path gs://recomm-job/foo/data/user_supplied/movielens.yaml
-        """.strip().format(ctx)
-
-        # resp = svc.projects().jobs()\
-        #           .create(parent='projects/{}'.format(project),
-        #                   body={
-        #                       'jobId': 'recomm_movielens_16',
-        #                       'trainingInput': {
-        #                           'pythonModule': 'trainer.ctrl',
-        #                           'region': 'asia-east1',
-        #                           'jobDir': 'gs://recomm-job/foo/model',
-        #                           'packageUris': 'recomm-job/foo/model/packages/{}/package-0.0.0.tar.gz'.format(utils.timestamp()),
-        #                           'runtimeVersion': '1.4',
-        #                           'pythonVersion': '3.5'
-        #                       }
-        #                   })\
-        #           .execute()
-        return utils.cmd(commands)
+        ret = {}
+        s = datetime.now()
+        p = None
+        try:
+            p = self.pre_action(params)
+            jobid = '{}_{}'.format(p.pid, utils.timestamp()).replace('-', '_')
+            commands = """
+                cd {} && \
+                gcloud ml-engine jobs submit training {} \
+                    --job-dir {} \
+                    --runtime-version 1.4 \
+                    --module-name trainer.ctrl \
+                    --package-path trainer \
+                    --region asia-east1 \
+                    --config config.yaml \
+                    -- \
+                    --method train \
+                    --conf-path {}
+            """.strip().format(env.PROJECT_PATH, jobid, p.job_dir, p.conf_path)
+            # authpath = utils.join(ctx, 'auth.json')
+            # svc = discovery.build('ml', 'v1', credentials=GoogleCredentials.from_stream(authpath))
+            # resp = svc.projects().jobs()\
+            #           .create(parent='projects/{}'.format(project),
+            #                   body={
+            #                       'jobId': 'recomm_movielens_16',
+            #                       'trainingInput': {
+            #                           'Module': 'trainer.ctrl',
+            #                           'region': 'asia-east1',
+            #                           'jobDir': 'gs://recomm-job/foo/model',
+            #                           'packageUris': 'recomm-job/foo/model/packages/{}/package-0.0.0.tar.gz'.format(utils.timestamp()),
+            #                           'runtimeVersion': '1.4',
+            #                           'pythonVersion': '3.5'
+            #                       }
+            #                   })\
+            #           .execute()
+            ret['response'] = utils.cmd(commands)
+            ret[env.ERR_CDE] = '00'
+        except Exception as e:
+            ret[env.ERR_CDE] = '99'
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+        finally:
+            self.logger.info('{}: gen_data take time {}'.format(p.pid, datetime.now() - s))
+        return ret
 
 
     def train(self, params):
         """do model ml-engine traning
 
-        1. check if there's some data missing, if so, try to re generate training data and config file
-        2. training recommendation model
         :param params: tensorflow HParams object storing user request data
         :return: json message
         """
         ret = {}
         try:
-            p = self.pre_action(params, is_train=True)
+            p = self.pre_action(params)
             schema = None
             try:
-                # TODO:
-                assert os.path.exists(p.parsed_conf_path), \
+                parsed_conf = utils.gcs_blob(p.parsed_conf_path)
+                assert parsed_conf.exists(), \
                     'parsed config [{}] not found'.format(p.parsed_conf_path)
 
                 for trf in (p.train_file, p.valid_file):
-                    assert os.path.exists(trf), "training file [{}] not found".format(trf)
+                    blob = utils.gcs_blob(trf)
+                    assert blob.exists(), "training file [{}] not found".format(trf)
             except Exception as e:
-                self.logger.warn(e)
+                raise e
                 # try to gen training data
-                # TODO:
-                self.logger.info('{}: try to generate training data...'.format(p.pid))
-                schema = self.service.gen_data(p)
+                # self.logger.info('{}: try to generate training data...'.format(p.pid))
+                # schema = self.service.gen_data(p)
 
             if schema is None:
-                # TODO:
                 self.logger.info('{}: try to unserialize {}'.format(p.pid, p.parsed_conf_path))
                 schema = self.service.unser_parsed_conf(p.parsed_conf_path)
 
@@ -143,21 +147,25 @@ class Ctrl(object):
             p.add_hparam('eval_name', '{}'.format(p.pid))
             p.add_hparam('n_batch', 128)
 
-            ## runtime calculating attrs
-            # training about 10 epochs
-            tr_steps = self.count_steps(schema.tr_count_, p.n_batch)
-            vl_steps = self.count_steps(schema.vl_count_, p.n_batch)
-            p.add_hparam('train_steps', tr_steps * 3)
-            p.add_hparam('eval_steps', vl_steps)
+            if 'train_steps' not in p:
+                # training about 10 epochs
+                tr_steps = self.count_steps(schema.tr_count_, p.n_batch)
+                p.add_hparam('train_steps', tr_steps * 10)
+
+            if 'eval_steps' not in p:
+                # training about 10 epochs
+                vl_steps = self.count_steps(schema.vl_count_, p.n_batch)
+                p.add_hparam('eval_steps', vl_steps)
+
             p.add_hparam('dim', 16)
-            # save once per epoch
+            # save once per epoch, cancel this in case of saving bad model when encounter overfitting
             p.add_hparam('save_every_steps', None)
             model = self.service.train(p, schema)
 
-            ret[env.ERR_CDE] = 00
+            ret[env.ERR_CDE] = '00'
             return model
         except Exception as e:
-            ret[env.ERR_CDE] = 99
+            ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
         finally:
@@ -177,9 +185,9 @@ class Ctrl(object):
                 .format(p.parsed_conf_path)
 
             ret['response'] = self.service.predict(p)
-            ret[env.ERR_CDE] = 00
+            ret[env.ERR_CDE] = '00'
         except Exception as e:
-            ret[env.ERR_CDE] = 99
+            ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
             # raise Exception(e)
@@ -190,6 +198,14 @@ class Ctrl(object):
 
     def count_steps(self, n_total, n_batch):
         return n_total // n_batch + (1 if n_total % n_batch else 0)
+
+    def load_schema(self, params):
+        from .utils import flex
+        p = self.pre_action(params)
+        loader = flex.Loader(conf_path=p.conf_path,
+                             parsed_conf_path=p.parsed_conf_path)
+        loader.check_schema()
+        return loader
 
     def test(self, params):
         pass

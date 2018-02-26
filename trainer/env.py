@@ -14,7 +14,12 @@ ERR_CDE = 'err_cde'
 ERR_MSG = 'err_msg'
 
 CREDENTIAL_NAME = 'GOOGLE_APPLICATION_CREDENTIALS'
-os.environ[CREDENTIAL_NAME] = '../auth.json'
+# hack
+print('os.environ[CREDENTIAL_NAME]:', os.environ.get(CREDENTIAL_NAME))
+if CREDENTIAL_NAME not in os.environ:
+    os.environ[CREDENTIAL_NAME] = '../auth.json'
+
+PROJECT_PATH = 'D:/Python/notebook/recomm_prod'
 
 class Logging(object):
     instance = None

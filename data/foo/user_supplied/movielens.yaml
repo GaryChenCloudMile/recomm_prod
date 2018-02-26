@@ -1,4 +1,4 @@
-project_id: foo
+project_id: foo_bar
 raw_dir: 'gs://movielens-foo/user_supplied/raws'
 override: true
 

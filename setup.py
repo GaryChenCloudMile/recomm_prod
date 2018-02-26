@@ -1,7 +1,7 @@
 from setuptools import find_packages
 from setuptools import setup
 
-REQUIRED_PACKAGES = []
+REQUIRED_PACKAGES = ['google-cloud>=0.32.0', 'google-api-python-client>=1.6.5']
 
 setup(
     name='trainer',
