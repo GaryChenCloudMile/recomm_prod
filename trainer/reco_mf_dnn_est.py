@@ -169,6 +169,7 @@ class ModelMfDNN(object):
             # print('clear checkpoint directory {}'.format(self.model_dir))
             # shutil.rmtree(self.model_dir)
             utils.gcs_clear(self.model_dir)
+            pass
 
         p = self.hparam
         # summary_hook = tf.train.SummarySaverHook(

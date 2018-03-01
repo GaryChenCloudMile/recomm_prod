@@ -32,12 +32,14 @@ class Ctrl(object):
         #     raise Exception('project id [{}] exists, put [override: true] in config file for overriding!'
         #                     .format(p.pid))
 
+        # hack
+        # p.add_hparam('job_dir', utils.join('../repo/foo/model', env.MODEL))
         p.add_hparam('job_dir', utils.join(p.repo, env.MODEL))
         p.add_hparam('data_dir', utils.join(p.repo, env.DATA))
         p.add_hparam('parsed_conf_path', utils.join(p.data_dir, self.PARSED_FNAME))
         return self
 
-    def pre_action(self, params):
+    def prepare_cloud(self, params):
         conf = self.service.read_user_conf(params.conf_path)
         p = HParams(conf_path=params.conf_path,
                     pid=conf[self.PROJECT_ID],
@@ -49,12 +51,26 @@ class Ctrl(object):
         p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
         return p
 
+    def prepare_local(self, params):
+        import codecs
+        conf_path = '../data/foo/user_supplied/movielens.local.yaml'
+        with codecs.open(conf_path, 'r', 'utf-8') as r:
+            conf = yaml.load(r)
+
+        p = HParams(conf_path=conf_path, pid=conf[self.PROJECT_ID], raw_dir=conf[self.RAW_DIR])
+        p.add_hparam('repo', utils.join(os.path.abspath('../repo'), p.pid))
+        p.add_hparam('job_dir', utils.join(p.repo, env.MODEL))
+        p.add_hparam('data_dir', utils.join(p.repo, env.DATA))
+        p.add_hparam('parsed_conf_path', utils.join(p.data_dir, self.PARSED_FNAME))
+        p.add_hparam('train_file', utils.join(p.repo, env.DATA, env.TRAIN_FNAME))
+        p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
+
     def gen_data(self, params):
         ret = {}
         s = datetime.now()
         p = None
         try:
-            p = self.pre_action(params)
+            p = self.prepare_cloud(params)
             self.service.gen_data(p)
 
             ret[env.ERR_CDE] = '00'
@@ -73,7 +89,7 @@ class Ctrl(object):
         s = datetime.now()
         p = None
         try:
-            p = self.pre_action(params)
+            p = self.prepare_cloud(params)
             jobid = '{}_{}'.format(p.pid, utils.timestamp()).replace('-', '_')
             commands = """
                 cd {} && \
@@ -88,6 +104,7 @@ class Ctrl(object):
                     --method train \
                     --conf-path {}
             """.strip().format(env.PROJECT_PATH, jobid, p.job_dir, p.conf_path)
+
             # authpath = utils.join(ctx, 'auth.json')
             # svc = discovery.build('ml', 'v1', credentials=GoogleCredentials.from_stream(authpath))
             # resp = svc.projects().jobs()\
@@ -123,7 +140,13 @@ class Ctrl(object):
         """
         ret = {}
         try:
-            p = self.pre_action(params)
+            # for cloud ml engine, del environment_vars.CREDENTIALS, or credential will invoke error
+            if 'is_local' not in params.values():
+                env.remove_cred_envars()
+            else:
+                self.logger.info('do local training ...')
+
+            p = self.prepare_cloud(params)
             schema = None
             try:
                 parsed_conf = utils.gcs_blob(p.parsed_conf_path)
@@ -147,12 +170,12 @@ class Ctrl(object):
             p.add_hparam('eval_name', '{}'.format(p.pid))
             p.add_hparam('n_batch', 128)
 
-            if 'train_steps' not in p:
+            if 'train_steps' not in p.values():
                 # training about 10 epochs
                 tr_steps = self.count_steps(schema.tr_count_, p.n_batch)
                 p.add_hparam('train_steps', tr_steps * 10)
 
-            if 'eval_steps' not in p:
+            if 'eval_steps' not in p.values():
                 # training about 10 epochs
                 vl_steps = self.count_steps(schema.vl_count_, p.n_batch)
                 p.add_hparam('eval_steps', vl_steps)
@@ -160,14 +183,44 @@ class Ctrl(object):
             p.add_hparam('dim', 16)
             # save once per epoch, cancel this in case of saving bad model when encounter overfitting
             p.add_hparam('save_every_steps', None)
-            model = self.service.train(p, schema)
+            self.service.train(p, schema)
 
             ret[env.ERR_CDE] = '00'
-            return model
         except Exception as e:
             ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
+            raise e
+        finally:
+            pass
+
+        return ret
+
+    def train_local_submit(self, params):
+        ret = {}
+        try:
+            p = self.prepare_cloud(params)
+            self.logger.info(utils.cmd("gcloud components list"))
+            commands = """
+                cd {} && \
+                gcloud ml-engine local train \
+                    --job-dir {} \
+                    --module-name trainer.ctrl \
+                    --package-path trainer \
+                    -- \
+                    --method train \
+                    --is-local true
+                    --conf-path {}
+            """.strip() \
+                .format(env.PROJECT_PATH, p.job_dir, p.parsed_conf_path)
+               # .format(env.PROJECT_PATH, '../repo/foo/model', '../repo/foo/data/{}'.format(self.PARSED_FNAME))
+            ret['response'] = utils.cmd(commands)
+            ret[env.ERR_CDE] = '00'
+        except Exception as e:
+            ret[env.ERR_CDE] = '99'
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+            raise e
         finally:
             pass
 
@@ -201,15 +254,25 @@ class Ctrl(object):
 
     def load_schema(self, params):
         from .utils import flex
-        p = self.pre_action(params)
+        p = self.prepare_cloud(params)
         loader = flex.Loader(conf_path=p.conf_path,
                              parsed_conf_path=p.parsed_conf_path)
         loader.check_schema()
         return loader
 
     def test(self, params):
-        pass
-
+        from .utils import flex
+        p = HParams(**params.values())
+        p.add_hparam('raw_paths', self.service.find_raws(p))
+        # assert len(p.raw_paths), 'must supply training data to processing! found nothing in {}' \
+        #     .format(p.raw_dir)
+        #
+        # loader = flex.Loader(conf_path=p.conf_path,
+        #                      parsed_conf_path=p.parsed_conf_path,
+        #                      raw_paths=p.raw_paths)
+        #
+        # loader.transform(p, reset=False, valid_size=.3)
+        print('p.raw_paths: ', p.raw_paths)
 
     def cmd(self, params):
         utils.cmd('gcloud ml-engine local predict'
@@ -240,7 +303,13 @@ if __name__ == '__main__':
         '--job-dir',
         help='where to put checkpoints',
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        '--is-local',
 
-    execution = getattr(Ctrl.instance, args.method)
-    execution(args)
+        help='whether run on local machine instead of cloud',
+
+    )
+    args = parser.parse_args()
+    params = HParams(**args.__dict__)
+    execution = getattr(Ctrl.instance, params.method)
+    execution(params)

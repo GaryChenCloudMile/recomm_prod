@@ -14,18 +14,20 @@ class Service(object):
         self.storage = None
 
     def read_user_conf(self, conf_path):
-        bucket, rest = utils.parse_gsc_uri(conf_path)
-        return yaml.load(env.bucket(bucket).get_blob(rest).download_as_string())
+        with flex.io(conf_path) as f:
+            return yaml.load(f.as_reader().stream)
+        # bucket, rest = utils.parse_gsc_uri(conf_path)
+        # return yaml.load(env.bucket(bucket).get_blob(rest).download_as_string())
 
     def unser_parsed_conf(self, parsed_conf_path):
-        self.logger.info('try to unserialize from {}'.format(parsed_conf_path))
         parsed_conf = utils.gcs_blob(parsed_conf_path)
         return flex.Schema.unserialize(BytesIO(parsed_conf.download_as_string()))
 
     def find_raws(self, p):
-        client_bucket, prefix = utils.parse_gsc_uri(p.raw_dir)
-        return ['gs://{}/{}'.format(client_bucket, e.name)
-                for e in env.bucket(client_bucket).list_blobs(prefix=prefix)]
+        return flex.io(p.raw_dir).list()
+        # client_bucket, prefix = utils.parse_gsc_uri(p.raw_dir)
+        # return ['gs://{}/{}'.format(client_bucket, e.name)
+        #         for e in env.bucket(client_bucket).list_blobs(prefix=prefix)]
 
     def gen_data(self, p):
         p.add_hparam('raw_paths', self.find_raws(p))
@@ -48,13 +50,16 @@ class Service(object):
         self.logger.info('hparam: {}'.format(sio.getvalue()))
 
         model = est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
+        # TODO: hack, take off this property
+        self.model = model
+
         train_input = model.input_fn([p.train_file], n_epoch=1, n_batch=p.n_batch)
         valid_input = model.input_fn([p.valid_file], n_epoch=1, n_batch=p.n_batch, shuffle=False)
         run_config = tf.estimator.RunConfig(
             log_step_count_steps=100,
             tf_random_seed=seed,
             # save_checkpoints_steps=p.save_every_steps,
-            )
+        )
 
         model.fit(train_input, valid_input, run_config, reset=True)
         return model

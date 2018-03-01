@@ -1,4 +1,4 @@
-import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, json
+import numpy as np, pandas as pd, yaml, codecs, os, tensorflow as tf, json, re
 
 from .. import env
 from . import utils
@@ -356,11 +356,12 @@ class Loader(object):
         # init schema
         if self.schema is None:
             # 1. try unserialize
-            parsed_conf = utils.gcs_blob(self.parsed_conf_path)
+            parsed_conf = io(self.parsed_conf_path)
             if parsed_conf.exists():
                 # if os.path.isfile(self.parsed_conf_path):
                 self.logger.info('try to unserialize from {}'.format(self.parsed_conf_path))
-                self.schema = Schema.unserialize(BytesIO(parsed_conf.download_as_string()))
+                with parsed_conf:
+                    self.schema = Schema.unserialize(parsed_conf.as_reader().stream)
             # 2. if parsed_conf_path not exists, try re-parse raw config file (conf_path supplied by user)
             else:
                 self.logger.info('try to parse {} (user supplied) ...'.format(self.conf_path))
@@ -372,7 +373,7 @@ class Loader(object):
         # reset: remove parsed config file and rebuild
         if reset:
             self.schema = None
-            utils.gcs_rm_quiet(self.parsed_conf_path)
+            io(self.parsed_conf_path).rm()
 
         self.check_schema()
 
@@ -384,27 +385,35 @@ class Loader(object):
         pos = 0
 
         # make tmp dir
-        tmp_ctx = '/tmp/{}'.format(params.pid)
-        os.makedirs(tmp_ctx, exist_ok=True)
-        trw = codecs.open('{}/data.tr.{}'.format(tmp_ctx, utils.timestamp()), 'w', 'utf-8')
+        # tmp_ctx = '/tmp/{}'.format(params.pid)
+        # os.makedirs(tmp_ctx, exist_ok=True)
+        # trw = codecs.open('{}/data.tr.{}'.format(tmp_ctx, utils.timestamp()), 'w', 'utf-8')
+        trw = io(params.train_file).as_writer(mode='w')
         vlw, rand_seq = None, None
         if valid_size:
             rand_seq = np.random.random(size=self.schema.count_)
-            vlw = codecs.open('{}/data.te.{}'.format(tmp_ctx, utils.timestamp()), 'a', 'utf-8')
+            # vlw = codecs.open('{}/data.te.{}'.format(tmp_ctx, utils.timestamp()), 'a', 'utf-8')
+            vlw = io(params.valid_file).as_writer(mode='w')
             self.schema.tr_count_ = int(sum(rand_seq > valid_size))
             self.schema.vl_count_ = int(sum(rand_seq <= valid_size))
 
         # serialize to specific path
-        stream = StringIO()
-        self.schema.serialize(stream)
-        utils.gcs_blob(self.parsed_conf_path).upload_from_file(BytesIO(stream.getvalue().encode('utf-8')))
+        f = io(self.parsed_conf_path)
+        if not f.exists():
+            with f:
+                stream = StringIO()
+                self.schema.serialize(stream)
+                f.write(stream.getvalue().encode('utf-8'))
+        # io(self.parsed_conf_path).write(stream.getvalue().encode('utf-8'))
+
         try:
             s = datetime.now()
             for fpath in params.raw_paths:
                 # download bytes from gcs, assume the file size is small
                 # because we suggest split large file into multi chunks in a directory
-                bio = BytesIO(utils.gcs_blob(fpath).download_as_string())
-                for chunk in pd.read_csv(bio, names=columns, chunksize=chunksize, dtype=dtype):
+                # bio = BytesIO(utils.gcs_blob(fpath).download_as_string())
+                stream = io(fpath).as_reader().stream
+                for chunk in pd.read_csv(stream, names=columns, chunksize=chunksize, dtype=dtype):
                     chunk = chunk.where(pd.notnull(chunk), None)[self.schema.cols]
                     for colname, col in chunk.iteritems():
                         # multivalent categorical columns
@@ -419,14 +428,14 @@ class Loader(object):
 
                     kws = {'index': False, 'header': None}
                     if not valid_size:
-                        chunk.to_csv(trw, **kws)
+                        chunk.to_csv(trw.stream, **kws)
                     else:
                         end_pos = pos + len(chunk)
                         rand_batch = rand_seq[pos:end_pos]
                         # 1 - (valid_size * 100)% training data, (valid_size * 100)% testing data
                         tr_chunk, vl_chunk = chunk[rand_batch > valid_size], chunk[rand_batch <= valid_size]
-                        tr_chunk.to_csv(trw, **kws)
-                        vl_chunk.to_csv(vlw, **kws)
+                        tr_chunk.to_csv(trw.stream, **kws)
+                        vl_chunk.to_csv(vlw.stream, **kws)
                         pos = end_pos
 
                 e = datetime.now()
@@ -435,17 +444,8 @@ class Loader(object):
         finally:
             _ = trw.close() if trw is not None else None
             _ = vlw.close() if vlw is not None else None
-            # write processed training data to gcs
-            self.to_gcs(trw, vlw, params.train_file, params.valid_file)
 
         return self
-
-    def to_gcs(self, trw, vlw, tr_tgt_path, vl_tgt_path):
-        for src, tgt_path in ((trw, tr_tgt_path), (vlw, vl_tgt_path)):
-            if src is not None:
-                self.logger.info('upload [{}] to {}'.format(src.name, tgt_path))
-                with codecs.open(src.name, 'rb') as r:
-                    utils.gcs_blob(tgt_path).upload_from_string(r.read())
 
     def trans_json(self, data):
         self.check_schema()
@@ -470,3 +470,91 @@ class Loader(object):
         return ret
 
 
+def io(path):
+    return FlexIO(path)
+
+class FlexIO(object):
+
+    logger = env.logger('FlexIO')
+
+    def __init__(self, path):
+        m = re.search('(?i)^gs://', path)
+        self.is_local = True if m is None else False
+        self.path = path
+        self.mode = None
+        self.encoding = None
+        self.placeholder = None
+        self.stream = None
+        self.check()
+
+    def check(self):
+        if not self.is_local:
+            self.placeholder = utils.gcs_blob(self.path)
+        return self
+
+    def exists(self):
+        return os.path.exists(self.path) if self.is_local else self.placeholder.exists()
+
+    def rm(self):
+        if self.is_local:
+            import shutil
+            _ = utils.rm_quiet(self.path) if os.path.isfile(self.path) else shutil.rmtree(self.path, ignore_errors=True)
+        else:
+            utils.gcs_rm_quiet(self.path)
+
+    def list(self):
+        if self.is_local:
+            if os.path.isdir(self.path):
+                return [utils.join(root, f).replace('\\', '/') for root, ds, fs in os.walk(self.path) for f in fs]
+            return []
+        else:
+            return list(map(lambda blob: 'gs://'+ utils.join(blob.bucket.name, blob.name), utils.gcs_list(self.path)))
+
+    def read(self):
+        return self.as_reader().read() if self.is_local else self.as_reader().stream.getvalue()
+
+    def write(self, data):
+        self.as_writer().stream.write(data)
+        return self
+
+    def as_reader(self, mode='rb', encoding=None):
+        self._file_handler('read', mode=mode, encoding=encoding)
+        return self
+
+    def as_writer(self, mode='wb', encoding=None):
+        self._file_handler('write', mode=mode, encoding=encoding)
+        return self
+
+    def _file_handler(self, tpe, mode, encoding):
+        if self.stream is None:
+            self.mode = mode
+            if self.is_local:
+                self.stream = codecs.open(self.path, mode=mode, encoding=encoding)
+            else:
+                self.stream = BytesIO() if 'b' in mode else StringIO()
+                if tpe == 'read':
+                    self.placeholder.download_to_file(self.stream)
+                    self.stream.seek(0)
+            self.stream.f = self
+        return self.stream
+
+    def close(self):
+        if self.stream is not None:
+            if not self.is_local and 'w' in self.mode:
+                self.logger.info('upload to [{}]'.format(self.path))
+                self.stream.seek(0)
+                # buff = self.stream
+                # if isinstance(self.stream, StringIO):
+                #     buff = BytesIO()
+                #     buff.write(self.stream.getvalue().encode())
+                self.placeholder.upload_from_string(self.stream.getvalue())
+            self.stream.close()
+            self.stream = None
+            self.mode = None
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

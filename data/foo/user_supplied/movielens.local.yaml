@@ -1,5 +1,4 @@
-gcs: H:/workspace/notebook/recomm_prod/repo
-project_id: foo
+project_id: foo-bar
 raw_dir: 'H:/workspace/notebook/recomm_prod/data/foo/user_supplied/raws'
 override: true
 

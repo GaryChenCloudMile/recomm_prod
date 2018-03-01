@@ -6,6 +6,7 @@ from datetime import datetime
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import MinMaxScaler
 from google.cloud.storage.blob import Blob
+from google.cloud.storage.bucket import Bucket
 from io import BytesIO, StringIO
 
 from .. import env
@@ -222,8 +223,14 @@ def parse_gsc_uri(s):
 def gcs_blob(s) -> Blob:
     bucket, prefix = parse_gsc_uri(s)
     bucket = env.bucket(bucket)
-    blob = bucket.get_blob(prefix)
-    return blob if blob is not None else Blob(name=prefix, bucket=bucket)
+    # use bucket.blob instead of get_blob, because get_blob return None when object not exists
+    # we just want a placeholder like File object in Java.
+    return bucket.blob(prefix)
+    # if len(prefix):
+    #     blob = bucket.blob(prefix)
+    #     return blob if blob is not None else Blob(name=prefix, bucket=bucket)
+    # else:
+    #     return bucket
 
 def gcs_clear(dir_):
     dir_ = gcs_blob(dir_)

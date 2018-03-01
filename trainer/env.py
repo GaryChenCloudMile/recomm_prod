@@ -1,4 +1,5 @@
 import os, yaml, logging, logging.config, codecs
+from google.auth import environment_vars
 
 # recommendation engine service bucket path
 HQ_BUCKET = 'gs://recomm-job'
@@ -13,13 +14,10 @@ VALID_FNAME = 'data.vl'
 ERR_CDE = 'err_cde'
 ERR_MSG = 'err_msg'
 
-CREDENTIAL_NAME = 'GOOGLE_APPLICATION_CREDENTIALS'
-# hack
-print('os.environ[CREDENTIAL_NAME]:', os.environ.get(CREDENTIAL_NAME))
-if CREDENTIAL_NAME not in os.environ:
-    os.environ[CREDENTIAL_NAME] = '../auth.json'
+CREDENTIAL_NAME = environment_vars.CREDENTIALS
+os.environ[CREDENTIAL_NAME] = '../auth.json'
 
-PROJECT_PATH = 'D:/Python/notebook/recomm_prod'
+PROJECT_PATH = os.path.abspath('..')
 
 class Logging(object):
     instance = None
@@ -49,6 +47,10 @@ def logger(name):
 
 class APIClient:
     storage_client = None
+
+def remove_cred_envars():
+    if CREDENTIAL_NAME in os.environ:
+        del os.environ[CREDENTIAL_NAME]
 
 def bucket(bucket_name):
     if APIClient.storage_client is None:
