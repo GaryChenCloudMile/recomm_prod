@@ -1,6 +1,6 @@
-import tensorflow as tf, os, time, traceback
+import tensorflow as tf, os, traceback
 from . import env
-from .utils import utils
+from .utils import flex
 
 from collections import OrderedDict
 
@@ -101,10 +101,12 @@ class ModelMfDNN(object):
             # self.alter_rating = tf.to_float(self.label >= 4)[:, tf.newaxis]
             self.ans = tf.to_float(self.labels)[:, tf.newaxis]
             self.loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.ans, logits=self.gmf))
+            tf.summary.scalar('loss', self.loss)
 
         with tf.variable_scope("metrics") as scope:
             self.auc = tf.metrics.auc(tf.cast(self.labels, tf.bool),
                                       tf.reshape(tf.nn.sigmoid(self.gmf), [-1]))
+            # tf.summary.scalar('auc', self.auc)
 
         self.train_op = None
         self.global_step = tf.train.get_or_create_global_step()
@@ -166,28 +168,25 @@ class ModelMfDNN(object):
 
     def fit(self, train_input, valid_input, run_config, reset=True):
         if reset:
-            # print('clear checkpoint directory {}'.format(self.model_dir))
-            # shutil.rmtree(self.model_dir)
-            utils.gcs_clear(self.model_dir)
-            pass
+            flex.io(self.model_dir).rm()
 
         p = self.hparam
         # summary_hook = tf.train.SummarySaverHook(
         #     100, output_dir=self.model_dir, summary_op=tf.train.Scaffold(summary_op=tf.summary.merge_all()))
         train_spec = tf.estimator.TrainSpec(train_input, max_steps=p.train_steps, hooks=None)
         # exporter = tf.estimator.LatestExporter(p.export_name, self.serving_inputs)
-        exporter = BestScoreExporter(p.export_name, self.serving_inputs)
+        self.exporter = BestScoreExporter(p.export_name, self.serving_inputs)
         eval_spec = tf.estimator.EvalSpec(valid_input,
                                           steps=p.eval_steps,
-                                          exporters=[exporter],
+                                          exporters=[self.exporter],
                                           name=p.eval_name,
-                                          # throttle_secs=26
+                                          # throttle_secs=10
                                          )
         # try to build local export directory avoid error
-        # try:
-        #     os.makedirs( os.path.join(self.model_dir, 'export', p.export_name) )
-        # except:
-        #     self.logger.error( traceback.format_exc() )
+        try:
+            os.makedirs( os.path.join(self.model_dir, 'export', p.export_name) )
+        except:
+            self.logger.warn( traceback.format_exc() )
 
         self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=run_config)
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
@@ -207,7 +206,7 @@ class MyHook(tf.train.SessionRunHook):
     def after_run(self, run_context, run_values):
         print(len(run_values.results))
 
-class BestScoreExporter(tf.estimator.Exporter):
+class BestScoreExporter(tf.estimator.LatestExporter):
     logger = env.logger('BestScoreExporter')
 
     def __init__(self,
@@ -220,6 +219,8 @@ class BestScoreExporter(tf.estimator.Exporter):
         self.assets_extra = assets_extra
         self.as_text = as_text
         self.best = None
+        self._exports_to_keep = 1
+        self.export_result = None
         self.logger.info('BestScoreExporter init')
 
     @property
@@ -230,10 +231,11 @@ class BestScoreExporter(tf.estimator.Exporter):
              is_the_final_export):
 
         curloss = eval_result['loss']
+        export_result = None
         if self.best is None or self.best >= curloss:
             self.best = curloss
             self.logger.info('nice eval loss: {}, export to pb'.format(curloss))
-            estimator.export_savedmodel(
+            export_result = estimator.export_savedmodel(
                 export_path,
                 self.serving_input_receiver_fn,
                 assets_extra=self.assets_extra,
@@ -241,3 +243,7 @@ class BestScoreExporter(tf.estimator.Exporter):
                 checkpoint_path=checkpoint_path)
         else:
             self.logger.info('bad eval loss: {}'.format(curloss))
+
+        self._garbage_collect_exports(export_path)
+        self.export_result = export_result
+        return export_result

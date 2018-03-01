@@ -2,6 +2,7 @@ import os, yaml, logging, logging.config, codecs
 from google.auth import environment_vars
 
 # recommendation engine service bucket path
+
 HQ_BUCKET = 'gs://recomm-job'
 
 DATA = 'data'
@@ -17,6 +18,7 @@ ERR_MSG = 'err_msg'
 CREDENTIAL_NAME = environment_vars.CREDENTIALS
 os.environ[CREDENTIAL_NAME] = '../auth.json'
 
+PROJECT_ID = 'training-recommendation-engine'
 PROJECT_PATH = os.path.abspath('..')
 
 class Logging(object):

@@ -96,8 +96,8 @@ class Schema(object):
         return self.extract(self.read_conf()).check().fit()
 
     def read_conf(self):
-        bucket, rest = utils.parse_gsc_uri(self.conf_path)
-        return env.bucket(bucket).get_blob(rest).download_as_string()
+        with io(self.conf_path) as f:
+            return f.read()
 
     def extract(self, conf):
         self.conf_ = yaml.load(conf)
@@ -218,67 +218,68 @@ class Schema(object):
         col_states = OrderedDict()
         # './merged_movielens.csv'
         for fpath in self.raw_paths:
-            blob = utils.gcs_blob(fpath)
+            blob = io(fpath)
             if not blob.exists():
                 self.logger.info("{} doesn't exists".format(fpath))
                 continue
 
-            bio = BytesIO(blob.download_as_string())
-            for chunk in pd.read_csv(bio, names=self.raw_cols, chunksize=20000, dtype=dtype):
-                chunk = chunk.where(pd.notnull(chunk), None)
+            # bio = BytesIO(blob.download_as_string())
+            with blob.as_reader() as f:
+                for chunk in pd.read_csv(f.stream, names=self.raw_cols, chunksize=20000, dtype=dtype):
+                    chunk = chunk.where(pd.notnull(chunk), None)
 
-                # loop all valid columns except label
-                for _, r in df_conf.iterrows():
-                    val, m_dtype, name, col_type = None, r[Schema.M_DTYPE], r[Schema.ID], r[Schema.TYPE]
-                    is_aux = r[Schema.AUX]
+                    # loop all valid columns except label
+                    for _, r in df_conf.iterrows():
+                        val, m_dtype, name, col_type = None, r[Schema.M_DTYPE], r[Schema.ID], r[Schema.TYPE]
+                        is_aux = r[Schema.AUX]
 
-                    if is_aux: continue
+                        if is_aux: continue
 
-                    if col_type == Schema.LABEL:
-                        if name not in col_states:
-                            col_states[name] = utils.CatgMapper(name, allow_null=False).init_check()
-                        # null value is not allowed in label column
-                        assert not chunk[name].hasnans, 'null value detected in label column! filename {}' \
-                            .format(fpath)
-                    else:
-                        # categorical column
+                        if col_type == Schema.LABEL:
+                            if name not in col_states:
+                                col_states[name] = utils.CatgMapper(name, allow_null=False).init_check()
+                            # null value is not allowed in label column
+                            assert not chunk[name].hasnans, 'null value detected in label column! filename {}' \
+                                .format(fpath)
+                        else:
+                            # categorical column
+                            if m_dtype == Schema.CATG:
+                                is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
+                                vocabs, vocabs_path = r[Schema.VOCABS], r[Schema.VOCABS_PATH]
+                                if name not in col_states:
+                                    if is_multi:
+                                        col_states[name] = utils.CatgMapper(name,
+                                                                            is_multi=is_multi,
+                                                                            sep=sep,
+                                                                            vocabs=vocabs,
+                                                                            vocabs_path=vocabs_path)\
+                                                                .init_check()
+                                    else:
+                                        col_states[name] = utils.CatgMapper(name,
+                                                                            vocabs=vocabs,
+                                                                            vocabs_path=vocabs_path)\
+                                                                .init_check()
+                            # numeric column
+                            elif m_dtype == Schema.CONT:
+                                if name not in col_states:
+                                    col_states[name] = utils.NumericMapper(name, default=r[Schema.DEFAULT])\
+                                                            .init_check()
+                            # datetime column: transform to numeric
+                            elif m_dtype == Schema.DATETIME:
+                                dt_fmt = r[Schema.DATE_FORMAT]
+                                if name not in col_states:
+                                    col_states[name] = utils.DatetimeMapper(name, dt_fmt, default=r[Schema.DEFAULT])\
+                                                            .init_check()
                         if m_dtype == Schema.CATG:
-                            is_multi, sep = r[Schema.IS_MULTI], r[Schema.SEP]
-                            vocabs, vocabs_path = r[Schema.VOCABS], r[Schema.VOCABS_PATH]
-                            if name not in col_states:
-                                if is_multi:
-                                    col_states[name] = utils.CatgMapper(name,
-                                                                        is_multi=is_multi,
-                                                                        sep=sep,
-                                                                        vocabs=vocabs,
-                                                                        vocabs_path=vocabs_path)\
-                                                            .init_check()
-                                else:
-                                    col_states[name] = utils.CatgMapper(name,
-                                                                        vocabs=vocabs,
-                                                                        vocabs_path=vocabs_path)\
-                                                            .init_check()
-                        # numeric column
-                        elif m_dtype == Schema.CONT:
-                            if name not in col_states:
-                                col_states[name] = utils.NumericMapper(name, default=r[Schema.DEFAULT])\
-                                                        .init_check()
-                        # datetime column: transform to numeric
-                        elif m_dtype == Schema.DATETIME:
-                            dt_fmt = r[Schema.DATE_FORMAT]
-                            if name not in col_states:
-                                col_states[name] = utils.DatetimeMapper(name, dt_fmt, default=r[Schema.DEFAULT])\
-                                                        .init_check()
-                    if m_dtype == Schema.CATG:
-                        # if freeze_ == True, that means user provided vocabs informations,
-                        # no need to fit anymore
-                        if not col_states[name].freeze_:
+                            # if freeze_ == True, that means user provided vocabs informations,
+                            # no need to fit anymore
+                            if not col_states[name].freeze_:
+                                col_states[name].partial_fit(chunk[name].values)
+                        else:
                             col_states[name].partial_fit(chunk[name].values)
-                    else:
-                        col_states[name].partial_fit(chunk[name].values)
 
-                # count data size
-                self.count_ += len(chunk)
+                    # count data size
+                    self.count_ += len(chunk)
 
         self.col_states_ = col_states
         valid_cond = self.df_conf_[Schema.TYPE].notnull() & (self.df_conf_[Schema.AUX] == False)
@@ -360,8 +361,8 @@ class Loader(object):
             if parsed_conf.exists():
                 # if os.path.isfile(self.parsed_conf_path):
                 self.logger.info('try to unserialize from {}'.format(self.parsed_conf_path))
-                with parsed_conf:
-                    self.schema = Schema.unserialize(parsed_conf.as_reader().stream)
+                with parsed_conf.as_reader():
+                    self.schema = Schema.unserialize(parsed_conf.stream)
             # 2. if parsed_conf_path not exists, try re-parse raw config file (conf_path supplied by user)
             else:
                 self.logger.info('try to parse {} (user supplied) ...'.format(self.conf_path))
@@ -400,11 +401,8 @@ class Loader(object):
         # serialize to specific path
         f = io(self.parsed_conf_path)
         if not f.exists():
-            with f:
-                stream = StringIO()
-                self.schema.serialize(stream)
-                f.write(stream.getvalue().encode('utf-8'))
-        # io(self.parsed_conf_path).write(stream.getvalue().encode('utf-8'))
+            with f.as_writer('w'):
+                self.schema.serialize(f.stream)
 
         try:
             s = datetime.now()
@@ -453,11 +451,8 @@ class Loader(object):
         self.logger.info('try to restful transform ... ')
         # json path to read
         if isinstance(data, str):
-            stream = StringIO()
-            utils.gcs_blob(data).download_to_file(stream)
-            data = json.load(stream.getvalue())
-            # with codecs.open(data, 'r', 'utf-8') as r:
-            #     data = json.load(r)
+            with io(data).as_reader('r') as f:
+                data = json.load(f.stream)
         else:
             data = data.copy()
 
@@ -500,7 +495,8 @@ class FlexIO(object):
             import shutil
             _ = utils.rm_quiet(self.path) if os.path.isfile(self.path) else shutil.rmtree(self.path, ignore_errors=True)
         else:
-            utils.gcs_rm_quiet(self.path)
+            _ = [utils.gcs_rm_quiet(e) for e in io(self.path).list()]
+        return self
 
     def list(self):
         if self.is_local:
@@ -510,11 +506,12 @@ class FlexIO(object):
         else:
             return list(map(lambda blob: 'gs://'+ utils.join(blob.bucket.name, blob.name), utils.gcs_list(self.path)))
 
-    def read(self):
-        return self.as_reader().read() if self.is_local else self.as_reader().stream.getvalue()
+    def read(self, mode='rb', encoding=None):
+        return self.as_reader(mode=mode, encoding=encoding).stream.read() if self.is_local \
+            else self.as_reader(mode=mode, encoding=encoding).stream.getvalue()
 
-    def write(self, data):
-        self.as_writer().stream.write(data)
+    def write(self, data, mode='wb', encoding=None):
+        self.as_writer(mode=mode, encoding=encoding).stream.write(data)
         return self
 
     def as_reader(self, mode='rb', encoding=None):
@@ -529,6 +526,10 @@ class FlexIO(object):
         if self.stream is None:
             self.mode = mode
             if self.is_local:
+                if not self.exists():
+                    dirpath = os.path.dirname( os.path.abspath(self.path) )
+                    self.logger.info('try to mkdirs [{}]'.format(dirpath))
+                    os.makedirs(dirpath, exist_ok=True)
                 self.stream = codecs.open(self.path, mode=mode, encoding=encoding)
             else:
                 self.stream = BytesIO() if 'b' in mode else StringIO()

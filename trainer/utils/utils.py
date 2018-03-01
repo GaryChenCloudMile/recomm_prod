@@ -10,6 +10,7 @@ from google.cloud.storage.bucket import Bucket
 from io import BytesIO, StringIO
 
 from .. import env
+from . import flex
 
 
 seed = 88
@@ -312,12 +313,12 @@ class CatgMapper(BaseMapper):
             self.freeze_ = True
 
         if self.vocabs_path is not None:
-            blob = gcs_blob(self.vocabs_path)
+            blob = flex.io(self.vocabs_path)
             assert blob.exists(), "[{}]: can't find vocabs file [{}]"\
-                                                      .format(self.name, self.vocabs_path)
+                                  .format(self.name, self.vocabs_path)
             self.logger.info('[{}] fetch vocab [{}] '.format(self.name, self.vocabs_path))
-            r = StringIO(blob.download_as_string().decode('utf-8'))
-            clazz = pd.Series(r.readlines()).map(str.strip).unique()
+            with blob.as_reader('r') as f:
+                clazz = pd.Series(f.stream.readlines()).map(str.strip).unique()
             self.classes_ = list(clazz[clazz != ''])
             self.gen_mapper()
             self.freeze_ = True
