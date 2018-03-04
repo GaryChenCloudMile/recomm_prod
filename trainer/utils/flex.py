@@ -528,7 +528,7 @@ class FlexIO(object):
             if self.is_local:
                 if not self.exists():
                     dirpath = os.path.dirname( os.path.abspath(self.path) )
-                    self.logger.info('try to mkdirs [{}]'.format(dirpath))
+                    # self.logger.info('try to mkdirs [{}]'.format(dirpath))
                     os.makedirs(dirpath, exist_ok=True)
                 self.stream = codecs.open(self.path, mode=mode, encoding=encoding)
             else:

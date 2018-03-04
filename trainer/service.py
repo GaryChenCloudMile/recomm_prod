@@ -52,7 +52,7 @@ class Service(object):
         run_config = tf.estimator.RunConfig(
             log_step_count_steps=300,
             tf_random_seed=seed,
-            save_checkpoints_secs=10
+            # save_checkpoints_secs=None,
             # save_checkpoints_steps=p.save_every_steps,
         )
 
@@ -66,18 +66,22 @@ class Service(object):
 
         # TODO: hack, take off this property
         self.model = model
-        model.fit(train_input, valid_input, run_config, reset=True)
-        self.deploy()
+        return model.fit(train_input, valid_input, run_config, reset=True)
 
-
-    def deploy(self, pid, model_export_path):
+    def deploy(self, p, export_path):
         credentials = GoogleCredentials.get_application_default()
         ml = discovery.build('ml', 'vl', credentials=credentials)
+
+        project_id = 'projects/{}'.format(p.pid)
+        modelID = '{}/models/{}'.format(project_id, p.jobid)
+        version = 'v1'
+        trainedModelLocation = export_path
+
         ml.projects().models().create(
             parent='projects/{}'.format(env.PROJECT_ID),
             body={
-                'name': '{}_recommendation'.format(pid),
-                'deploymentUri': model_export_path
+                'name': '{}_recommendation'.format(p.pid),
+                'deploymentUri': export_path
             })
 
 

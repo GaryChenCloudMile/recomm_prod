@@ -146,8 +146,6 @@ class Ctrl(object):
         ret = {}
         s = datetime.now()
         try:
-
-
             p = self.prepare_cloud(params)
             credentials = GoogleCredentials.get_application_default()
             ml = discovery.build('ml', 'v1', credentials=credentials)
@@ -213,7 +211,8 @@ class Ctrl(object):
             p.add_hparam('dim', 16)
             # save once per epoch, cancel this in case of saving bad model when encounter overfitting
             p.add_hparam('save_every_steps', None)
-            self.service.train(p, schema)
+            model = self.service.train(p, schema)
+            self.service.deploy(p, model.exporter.export_result)
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -224,6 +223,11 @@ class Ctrl(object):
             pass
 
         return ret
+
+    def deploy(self, params):
+        p = self.prepare_cloud(params)
+        export_path = utils.join(p.job_dir, 'export', p.export_name, '')
+        self.service.deploy(p, export_path)
 
     def train_local_submit(self, params):
         """not working in windows envs, gcloud bind python version must be 2.7
@@ -259,10 +263,6 @@ class Ctrl(object):
             pass
 
         return ret
-
-    def deploy(self, params):
-        p = self.prepare_cloud(params)
-        print( flex.io(utils.join(p.job_dir, 'export', p.export_name)).list() )
 
     def predict(self, params):
         ret = {}

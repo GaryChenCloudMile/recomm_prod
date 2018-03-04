@@ -18,6 +18,7 @@ class ModelMfDNN(object):
         self.n_genres = n_genres
         self.schema = schema
         self.hparam = hparam
+        self.exporter = None
         if hparam is not None:
             self.model_dir = hparam.job_dir
 
