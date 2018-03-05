@@ -1,6 +1,6 @@
 project_id: foo-bar
+model_id: movielens_recommendation
 raw_dir: 'gs://movielens-foo/user_supplied/raws'
-override: true
 
 columns:
     - {id: user_id, m_dtype: catg}

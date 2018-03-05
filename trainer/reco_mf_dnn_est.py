@@ -1,6 +1,6 @@
 import tensorflow as tf, os, traceback
 from . import env
-from .utils import flex
+from .utils import flex, utils
 
 from collections import OrderedDict
 
@@ -207,7 +207,7 @@ class MyHook(tf.train.SessionRunHook):
     def after_run(self, run_context, run_values):
         print(len(run_values.results))
 
-class BestScoreExporter(tf.estimator.LatestExporter):
+class BestScoreExporter(tf.estimator.Exporter):
     logger = env.logger('BestScoreExporter')
 
     def __init__(self,
@@ -231,6 +231,11 @@ class BestScoreExporter(tf.estimator.LatestExporter):
     def export(self, estimator, export_path, checkpoint_path, eval_result,
              is_the_final_export):
 
+        # clean first, only keep the best weights
+        self.logger.info('clean export_path: {}'.format(export_path))
+        export_ctx = flex.io(export_path)
+        export_ctx.rm().mkdirs()
+
         curloss = eval_result['loss']
         export_result = None
         if self.best is None or self.best >= curloss:
@@ -245,6 +250,6 @@ class BestScoreExporter(tf.estimator.LatestExporter):
         else:
             self.logger.info('bad eval loss: {}'.format(curloss))
 
-        self._garbage_collect_exports(export_path)
+        # self._garbage_collect_exports(export_path)
         self.export_result = export_result
         return export_result

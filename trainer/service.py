@@ -6,6 +6,7 @@ from .utils import flex, utils
 
 from oauth2client.client import GoogleCredentials
 from googleapiclient import discovery
+from googleapiclient import errors
 
 
 seed = 88
@@ -58,31 +59,55 @@ class Service(object):
 
         # try to build local export directory avoid error
         if p.is_local:
-            import traceback
-            try:
-                os.makedirs(utils.join(p.job_dir, 'export', p.export_name))
-            except:
-                self.logger.error(traceback.format_exc())
+            flex.io(utils.join(p.job_dir, 'export', p.export_name)).mkdirs()
+            # os.makedirs(utils.join(p.job_dir, 'export', p.export_name))
 
-        # TODO: hack, take off this property
-        self.model = model
-        return model.fit(train_input, valid_input, run_config, reset=True)
+        model.fit(train_input, valid_input, run_config, reset=True)
+
+        # export deploy info
+        deploy_info = {}
+        deploy_info['job_id'] = p.job_id
+        deploy_info['model_id'] = p.model_id
+        deploy_info['export_path'] = model.exporter.export_result.decode()
+        with flex.io(p.deploy_path).as_writer('w') as f:
+            yaml.dump(deploy_info, f.stream)
+
+        return model
 
     def deploy(self, p, export_path):
         credentials = GoogleCredentials.get_application_default()
-        ml = discovery.build('ml', 'vl', credentials=credentials)
+        ml = discovery.build('ml', 'v1', credentials=credentials)
+        model_name = '{}_{}'.format(p.pid, p.model_id).replace('-', '_')
+        # res = ml.projects().models().versions().list(
+        #     parent='projects/{}/models/{}'.format(env.PROJECT_ID, model_name)
+        # ).execute()
 
-        project_id = 'projects/{}'.format(p.pid)
-        modelID = '{}/models/{}'.format(project_id, p.jobid)
-        version = 'v1'
-        trainedModelLocation = export_path
+        # ml.projects().models().create(
+        #     parent='projects/{}'.format(env.PROJECT_ID),
+        #     body={'name': model_name}
+        # ).execute()
 
-        ml.projects().models().create(
-            parent='projects/{}'.format(env.PROJECT_ID),
+        ver_name = 'projects/{}/models/{}/versions/v1'.format(env.PROJECT_ID, model_name)
+        ml.projects().models().versions().delete(name=ver_name)
+        ml.projects().models().versions().create(
+            parent=ver_name,
             body={
-                'name': '{}_recommendation'.format(p.pid),
-                'deploymentUri': export_path
-            })
+                'name': 'v1',
+                'description': '[{}] recommendation model'.format(p.pid),
+                # 'isDefault': True,
+                'deploymentUri': export_path.decode() if isinstance(export_path, bytes) else export_path,
+                'runtimeVersion': p.runtime_version,
+                'state': 'UPDATING'
+            }
+        ).execute()
+
+        # try:
+        #     res = ml.projects().models().versions().get(
+        #         name='projects/{}/models/{}/versions/{}'.format(env.PROJECT_ID, model_name, 'v12')
+        #     ).execute()
+        # except errors.HttpError as e:
+        #     print('xxxxxxxx', vars(e))
+        return res
 
 
     def predict(self, p):
@@ -93,12 +118,11 @@ class Service(object):
 
         # ml-engine local predict
         tmpfile = 'tmp.{}.json'.format(utils.timestamp())
-        # TODO:
         with flex.io(tmpfile).as_writer('w') as f:
             json.dump(data, f.stream)
 
         ml = discovery.build('ml', 'v1')
-        name = 'projects/{}/models/{}'.format(project, model)
+        name = 'projects/{}/models/{}'.format(env.PROJECT_ID, p.jobid)
 
         # command = ('gcloud ml-engine local predict'
         #            ' --model-dir D:/Python/notebook/recomm_prod/repo/foo/model_1518581106.1947258/export/export_foo/1518581138'

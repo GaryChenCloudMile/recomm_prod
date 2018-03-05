@@ -388,12 +388,12 @@ class Loader(object):
         # make tmp dir
         # tmp_ctx = '/tmp/{}'.format(params.pid)
         # os.makedirs(tmp_ctx, exist_ok=True)
-        # trw = codecs.open('{}/data.tr.{}'.format(tmp_ctx, utils.timestamp()), 'w', 'utf-8')
+        # trw = codecs.open('{}/data.tr.{}'.format(tmp_ctx, utils.timestamp()), 'w')
         trw = io(params.train_file).as_writer(mode='w')
         vlw, rand_seq = None, None
         if valid_size:
             rand_seq = np.random.random(size=self.schema.count_)
-            # vlw = codecs.open('{}/data.te.{}'.format(tmp_ctx, utils.timestamp()), 'a', 'utf-8')
+            # vlw = codecs.open('{}/data.te.{}'.format(tmp_ctx, utils.timestamp()), 'a')
             vlw = io(params.valid_file).as_writer(mode='w')
             self.schema.tr_count_ = int(sum(rand_seq > valid_size))
             self.schema.vl_count_ = int(sum(rand_seq <= valid_size))
@@ -498,13 +498,20 @@ class FlexIO(object):
             _ = [utils.gcs_rm_quiet(e) for e in io(self.path).list()]
         return self
 
+    def mkdirs(self):
+        if self.is_local:
+            os.makedirs(self.path, exist_ok=True)
+        else:
+            env.logger('FlexIO').info('mkdirs not support by GCS!')
+        return self
+
     def list(self):
         if self.is_local:
             if os.path.isdir(self.path):
                 return [utils.join(root, f).replace('\\', '/') for root, ds, fs in os.walk(self.path) for f in fs]
             return []
         else:
-            return list(map(lambda blob: 'gs://'+ utils.join(blob.bucket.name, blob.name), utils.gcs_list(self.path)))
+            return list(map(lambda blob: 'gs://' + utils.join(blob.bucket.name, blob.name), utils.gcs_list(self.path)))
 
     def read(self, mode='rb', encoding=None):
         return self.as_reader(mode=mode, encoding=encoding).stream.read() if self.is_local \
@@ -532,9 +539,16 @@ class FlexIO(object):
                     os.makedirs(dirpath, exist_ok=True)
                 self.stream = codecs.open(self.path, mode=mode, encoding=encoding)
             else:
-                self.stream = BytesIO() if 'b' in mode else StringIO()
+                is_binary = 'b' in mode
+                self.stream = BytesIO() if is_binary else StringIO()
                 if tpe == 'read':
-                    self.placeholder.download_to_file(self.stream)
+                    # GCS only accept bytes download ...
+                    if is_binary:
+                        self.placeholder.download_to_file(self.stream)
+                    else:
+                        stream_ = BytesIO()
+                        self.placeholder.download_to_file(stream_)
+                        self.stream.write(stream_.getvalue().decode())
                     self.stream.seek(0)
             self.stream.f = self
         return self.stream
