@@ -231,17 +231,16 @@ class BestScoreExporter(tf.estimator.Exporter):
     def export(self, estimator, export_path, checkpoint_path, eval_result,
              is_the_final_export):
 
-        # clean first, only keep the best weights
-        self.logger.info('clean export_path: {}'.format(export_path))
-        export_ctx = flex.io(export_path)
-        export_ctx.rm().mkdirs()
-
         curloss = eval_result['loss']
-        export_result = None
         if self.best is None or self.best >= curloss:
+            # clean first, only keep the best weights
+            self.logger.info('clean export_path: {}'.format(export_path))
+            export_ctx = flex.io(export_path)
+            export_ctx.rm().mkdirs()
+
             self.best = curloss
             self.logger.info('nice eval loss: {}, export to pb'.format(curloss))
-            export_result = estimator.export_savedmodel(
+            self.export_result = estimator.export_savedmodel(
                 export_path,
                 self.serving_input_receiver_fn,
                 assets_extra=self.assets_extra,
@@ -250,6 +249,4 @@ class BestScoreExporter(tf.estimator.Exporter):
         else:
             self.logger.info('bad eval loss: {}'.format(curloss))
 
-        # self._garbage_collect_exports(export_path)
-        self.export_result = export_result
-        return export_result
+        return self.export_result

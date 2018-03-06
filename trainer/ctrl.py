@@ -1,11 +1,8 @@
-import argparse, os, time, yaml
+import argparse, os, time, yaml, pandas as pd
 
 from . import env, service
 from .utils import utils, flex
 from datetime import datetime
-from tensorflow.contrib.training.python.training.hparam import HParams
-from oauth2client.client import GoogleCredentials
-from googleapiclient import discovery
 
 
 class Ctrl(object):
@@ -28,62 +25,59 @@ class Ctrl(object):
     def __init__(self):
         self.service = service.Service()
 
-    def check_project(self, p):
-        # central repo
-        p.add_hparam('repo', utils.join(env.HQ_BUCKET, p.pid, p.model_id))
-
-        # individual gcs from clients
-        # p.add_hparam('repo', utils.join(conf[Ctrl.GCS], p.pid))
-        # p.add_hparam('log_dir', utils.join(p.repo, env.LOG))
-        # self.logger = env.logger(p.pid)
-        # if is_train and not p.override and os.path.exists(p.repo):
-        #     raise Exception('project id [{}] exists, put [override: true] in config file for overriding!'
-        #                     .format(p.pid))
-        if 'job_dir' not in p.values():
-            p.add_hparam('job_dir', utils.join(p.repo, env.MODEL))
-        p.add_hparam('data_dir', utils.join(p.repo, env.DATA))
-        p.add_hparam('deploy_path', utils.join(p.repo, env.DATA, self.DEPLOY_FNAME))
-        p.add_hparam('parsed_conf_path', utils.join(p.data_dir, self.PARSED_FNAME))
-        return self
-
-    def _prepare(self, params) -> HParams:
-        p = HParams(**params.values())
+    def prepare(self, params):
+        p = pd.Series(params)
         conf = self.service.read_user_conf(p.conf_path)
-        p.add_hparam('pid', conf[self.PROJECT_ID])
-        p.add_hparam(self.RAW_DIR, conf[self.RAW_DIR])
-        p.add_hparam(self.MODEL_ID, conf[self.MODEL_ID])
-        p.add_hparam('runtime_version', '1.4')
-        # p.add_hparam(self.JOB_ID, '{}_{}'.format(p.pid, utils.timestamp()).replace('-', '_'))
+        p.at['pid'] = conf[self.PROJECT_ID]
+        p.at[self.RAW_DIR] = conf[self.RAW_DIR]
+        p.at[self.MODEL_ID] = conf[self.MODEL_ID]
+        if p.get('runtime_version') is None:
+            p.at['runtime_version'] = '1.4'
+
+        # for cloud ml engine, del environment_vars.CREDENTIALS, or credential will invoke error
+        if not p.get('is_local'):
+            p = self._prepare_cloud(p)
+        # local training
+        else:
+            p = self._prepare_local(p)
         return p
 
-    def prepare_cloud(self, params):
-        p = self._prepare(params)
-        self.check_project(p)
-        p.add_hparam('train_file', utils.join(p.repo, env.DATA, env.TRAIN_FNAME))
-        p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
-        p.add_hparam('export_name', 'export_{}'.format(p.pid))
-        p.add_hparam('eval_name', '{}'.format(p.pid))
+    def _check_project(self, p):
+        # central repo
+        p.at['repo'] = utils.join(env.HQ_BUCKET, p.pid, p.model_id)
+        if 'job_dir' not in p:
+            p.at['job_dir'] = utils.join(p.repo, env.MODEL)
+        p.at['data_dir'] = utils.join(p.repo, env.DATA)
+        p.at['deploy_path'] = utils.join(p.repo, env.DATA, self.DEPLOY_FNAME)
+        p.at['parsed_conf_path'] = utils.join(p.data_dir, self.PARSED_FNAME)
         return p
 
-    def prepare_local(self, params):
-        p = self._prepare(params)
-        p.add_hparam('repo', utils.join(os.path.abspath('../repo'), p.pid, p.model_id))
-        p.add_hparam('job_dir', utils.join(p.repo, env.MODEL))
-        p.add_hparam('data_dir', utils.join(p.repo, env.DATA))
-        p.add_hparam('deploy_path', utils.join(p.repo, env.DATA, self.DEPLOY_FNAME))
-        p.add_hparam('parsed_conf_path', utils.join(p.data_dir, self.PARSED_FNAME))
-        p.add_hparam('train_file', utils.join(p.repo, env.DATA, env.TRAIN_FNAME))
-        p.add_hparam('valid_file', utils.join(p.repo, env.DATA, env.VALID_FNAME))
-        p.add_hparam('export_name', 'export_{}'.format(p.pid))
-        p.add_hparam('eval_name', '{}'.format(p.pid))
+    def _prepare_cloud(self, p):
+        self._check_project(p)
+        p.at['train_file'] = utils.join(p.repo, env.DATA, env.TRAIN_FNAME)
+        p.at['valid_file'] = utils.join(p.repo, env.DATA, env.VALID_FNAME)
+        p.at['export_name'] = 'export_{}'.format(p.pid)
+        p.at['eval_name'] = '{}'.format(p.pid)
+        return p
+
+    def _prepare_local(self, p):
+        p.at['repo'] = utils.join(os.path.abspath('../repo'), p.pid, p.model_id)
+        p.at['job_dir'] = utils.join(p.repo, env.MODEL)
+        p.at['data_dir'] = utils.join(p.repo, env.DATA)
+        p.at['deploy_path'] = utils.join(p.repo, env.DATA, self.DEPLOY_FNAME)
+        p.at['parsed_conf_path'] = utils.join(p.data_dir, self.PARSED_FNAME)
+        p.at['train_file'] = utils.join(p.repo, env.DATA, env.TRAIN_FNAME)
+        p.at['valid_file'] = utils.join(p.repo, env.DATA, env.VALID_FNAME)
+        p.at['export_name'] = 'export_{}'.format(p.pid)
+        p.at['eval_name'] = '{}'.format(p.pid)
         return p
 
     def gen_data(self, params):
         ret = {}
+        p = self.prepare(params)
         s = datetime.now()
         p = None
         try:
-            p = self.prepare_cloud(params) if not params.is_local else self.prepare_local(params)
             self.service.gen_data(p)
 
             ret[env.ERR_CDE] = '00'
@@ -101,9 +95,8 @@ class Ctrl(object):
     def train_submit(self, params):
         ret = {}
         s = datetime.now()
-        p = None
+        p = self.prepare(params)
         try:
-            p = self.prepare_cloud(params)
             job_id = self.find_job_id(p)
             commands = """
                 cd {} && \
@@ -115,8 +108,9 @@ class Ctrl(object):
                     --config config.yaml \
                     --runtime-version 1.4 \
                     -- \
+                    --train-steps 1000 \
                     --method train \
-                    --conf-path {}
+                    --conf-path {} \
                     --job-id {}
             """.strip().format(env.PROJECT_PATH, job_id, p.job_dir, p.conf_path, job_id)
 
@@ -149,12 +143,12 @@ class Ctrl(object):
 
     def describe(self, params):
         ret = {}
+        p = self.prepare(params)
         s = datetime.now()
         try:
-            p = self.prepare_cloud(params)
-            credentials = GoogleCredentials.get_application_default()
-            ml = discovery.build('ml', 'v1', credentials=credentials)
-            name = 'projects/{}/jobs/{}'.format(env.PROJECT_ID, p.job_id)
+            ml = self.service.find_ml()
+            deploy_info = self.service.deploy_info(p)
+            name = 'projects/{}/jobs/{}'.format(env.PROJECT_ID, deploy_info.get('job_id'))
             ret[self.RESPONSE] = ml.projects().jobs().get(name=name).execute()
             ret[env.ERR_CDE] = '00'
         except Exception as e:
@@ -168,19 +162,20 @@ class Ctrl(object):
     def train(self, params):
         """do model ml-engine traning
 
-        :param params: tensorflow HParams object storing user request data
+        :param params: dict object storing user request data
         :return: json message
         """
         ret = {}
         try:
-            # for cloud ml engine, del environment_vars.CREDENTIALS, or credential will invoke error
-            if 'is_local' not in params.values() or not params.is_local:
+            self.logger.info('received params: {}'.format(params))
+            # if run on compute engine or any vm on GCP, remove the environment_vars.CREDENTIALS environ var
+            if not params.get('is_local'):
+                self.logger.info('do cloud training')
                 env.remove_cred_envars()
-            # local training
             else:
-                self.logger.info('do local training ...')
+                self.logger.info('do local training')
 
-            p = self.prepare_cloud(params) if not params.is_local else self.prepare_local(params)
+            p = self.prepare(params)
             schema = None
             try:
                 parsed_conf = flex.io(p.parsed_conf_path)
@@ -201,27 +196,42 @@ class Ctrl(object):
                 self.logger.info('{}: try to unserialize {}'.format(p.pid, p.parsed_conf_path))
                 schema = self.service.unser_parsed_conf(p.parsed_conf_path)
 
-            p.add_hparam('n_batch', 128)
-            if 'train_steps' not in p.values():
+            p.at['n_batch'] = 128
+            if p.get('train_steps') is None:
                 # training about 10 epochs
                 tr_steps = self.count_steps(schema.tr_count_, p.n_batch)
-                p.add_hparam('train_steps', tr_steps * 3)
+                p.at['train_steps'] = tr_steps * 3
 
-            if 'eval_steps' not in p.values():
+            if p.get('eval_steps') is None:
                 # training about 10 epochs
                 vl_steps = self.count_steps(schema.vl_count_, p.n_batch)
-                p.add_hparam('eval_steps', vl_steps)
+                p.at['eval_steps'] = vl_steps
 
-            p.add_hparam('dim', 16)
+            p.at['dim'] = 16
             # save once per epoch, cancel this in case of saving bad model when encounter overfitting
-            p.add_hparam('save_every_steps', None)
+            p.at['save_every_steps'] = None
             # local test has no job_id attr
             if p.is_local:
-                p.add_hparam('job_id', self.find_job_id(p))
+                p.at['job_id'] = self.find_job_id(p)
 
-            model = self.service.train(p, schema)
-            # TODO: hack
-            # self.service.deploy(p, model.exporter.export_result)
+            self.service.train(p, schema)
+            ret[env.ERR_CDE] = '00'
+        except Exception as e:
+            ret[env.ERR_CDE] = '99'
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+            raise e
+        finally:
+            pass
+
+        return ret
+
+    def model_info(self, params):
+        ret = {}
+        p = self.prepare(params)
+        try:
+            res = self.service.model_info(p)
+            ret['response'] = res
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -235,9 +245,8 @@ class Ctrl(object):
 
     def deploy(self, params):
         ret = {}
+        p = self.prepare(params)
         try:
-            p = self.prepare_cloud(params)
-
             with flex.io(p.deploy_path).as_reader('r') as f:
                 deploy_conf = yaml.load(f.stream)
             res = self.service.deploy(p, deploy_conf[self.EXPORT_PATH])
@@ -260,8 +269,8 @@ class Ctrl(object):
         :return:
         """
         ret = {}
+        p = self.prepare(params)
         try:
-            p = self.prepare_cloud(params)
             self.logger.info(utils.cmd("gcloud components list"))
             commands = """
                 cd {} && \
@@ -290,11 +299,9 @@ class Ctrl(object):
 
     def predict(self, params):
         ret = {}
-        conf = self.service.read_user_conf(params.conf_path)
-        p = HParams(pid=conf[Ctrl.PROJECT_ID], conf_path=params.conf_path, data=params.data)
+        p = self.prepare(params)
         s = datetime.now()
         try:
-            p = self.prepare_cloud(params) if not params.is_local else self.prepare_local(params)
             parsed_conf = flex.io(p.parsed_conf_path)
             assert parsed_conf.exists(), "can't find schema cause {} not exists" \
                 .format(p.parsed_conf_path)
@@ -305,7 +312,6 @@ class Ctrl(object):
             ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
-            # raise Exception(e)
         finally:
             self.logger.info('{}: predict take time {}'.format(p.pid, datetime.now() - s))
         return ret
@@ -315,8 +321,8 @@ class Ctrl(object):
 
     def load_schema(self, params):
         from .utils import flex
-        p = self.prepare_cloud(params)
-        p.add_hparam('raw_paths', self.service.find_raws(p))
+        p = self.prepare(params)
+        p.at['raw_paths'] = self.service.find_raws(p)
         loader = flex.Loader(conf_path=p.conf_path,
                              parsed_conf_path=p.parsed_conf_path,
                              raw_paths=p.raw_paths)
@@ -324,7 +330,20 @@ class Ctrl(object):
         return loader
 
     def test(self, params):
-        pass
+        ret = {}
+        try:
+            p = self.prepare(params)
+            ret['response'] = self.service.deploy_info(p)
+            ret[env.ERR_CDE] = '00'
+        except Exception as e:
+            ret[env.ERR_CDE] = '99'
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+            raise e
+        finally:
+            pass
+
+        return ret
 
     def cmd(self, params):
         utils.cmd('gcloud ml-engine local predict'
@@ -361,16 +380,17 @@ if __name__ == '__main__':
         help='whether run on local machine instead of cloud',
     )
     parser.add_argument(
-        '--train_steps',
+        '--train-steps',
         default=1000,
+        type=int,
         help='max train steps',
     )
-    # parser.add_argument(
-    #     '--runtime-version',
-    #     default='1.4',
-    #     help='whether run on local machine instead of cloud',
-    # )
+    parser.add_argument(
+        '--runtime-version',
+        default='1.4',
+        help='whether run on local machine instead of cloud',
+    )
     args = parser.parse_args()
-    params = HParams(**args.__dict__)
-    execution = getattr(Ctrl.instance, params.method)
+    params = args.__dict__
+    execution = getattr(Ctrl.instance, params.get('method'))
     execution(params)
