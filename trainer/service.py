@@ -1,4 +1,4 @@
-import yaml, os, tensorflow as tf, json, time
+import yaml, os, tensorflow as tf, json, time, pandas as pd
 
 from . import env
 from . import reco_mf_dnn_est as est
@@ -38,7 +38,7 @@ class Service(object):
         return loader.schema
 
     def train(self, p, schema):
-        self.logger.info('received params: {}'.format(p))
+        self.logger.info('received params: {}'.format(p.to_dict() if isinstance(p, pd.Series) else p))
         model = est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
         train_input = model.input_fn([p.train_file], n_epoch=1, n_batch=p.n_batch)
         valid_input = model.input_fn([p.valid_file], n_epoch=1, n_batch=p.n_batch, shuffle=False)
@@ -65,6 +65,12 @@ class Service(object):
             yaml.dump(deploy_info, f.stream)
 
         return model
+
+    def init_model(self, p):
+        self.logger.info('received params: {}'.format(p))
+        with flex.io(p.parsed_conf_path).as_reader('r') as f:
+            schema = flex.Schema.unserialize(f.stream)
+        return est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
 
     def find_ml(self):
         credentials = GoogleCredentials.get_application_default()
@@ -121,7 +127,7 @@ class Service(object):
         proj_uri = 'projects/{}'.format(env.PROJECT_ID)
         try:
             ml.projects().models().create(
-                parent=proj_uri, body={'name': model_name}
+                parent=proj_uri, body={'name': model_name, 'onlinePredictionLogging': True}
             ).execute()
             # wait for create
             self.wait(3)
@@ -158,14 +164,32 @@ class Service(object):
     def wait(self, sec):
         time.sleep(sec)
 
-    def predict(self, p):
+    def transform(self, p):
         # self.logger.info('predict.params: {}'.format(p.to_dict()))
         loader = flex.Loader(p.conf_path, p.parsed_conf_path)
         # transform data to model recognizable
-        data = loader.trans_json(p.json_data)
+        return loader.trans_json(p.json_data)
 
+    def predict(self, p):
+        data_for_model = self.transform(p)
         deploy_info = self.deploy_info(p)
-        model_uri = 'projects/{}/models/{}'.format(env.PROJECT_ID, deploy_info.get('model_name'))
-        ml = self.find_ml()
-        ml.projects().predict(name='')
-        return data
+
+        # python restful api predict
+        # model_uri = 'projects/{}/models/{}'.format(env.PROJECT_ID, deploy_info.get('model_name'))
+        # ml = self.find_ml()
+        # return ml.projects().predict(name=model_uri, body={'instances': [data_for_model]}).execute()
+
+        # gcloud predict
+        with flex.io('./data.json').as_writer('w') as f:
+            for r in data_for_model:
+                f.stream.write(json.dumps(r) + '\n')
+
+        commands = '''
+            gcloud ml-engine predict --model {}  \
+                   --version {} \
+                   --json-instances {}
+        '''.strip().format(deploy_info.get('model_name'),
+                           deploy_info.get('version'),
+                           './data.json')
+        return {'data_for_model': data_for_model, 'response': utils.cmd(commands)}
+

@@ -83,7 +83,7 @@ class ModelMfDNN(object):
                         tf.reshape(self.candidate_bias, (1, -1)) + \
                         self.query_bias + \
                         self.b_global
-            self.pred = tf.nn.sigmoid(self.pred)
+            self.pred = tf.nn.sigmoid(self.pred, name='pred')
 
         # Provide an estimator spec for `ModeKeys.PREDICT`
         if mode == tf.estimator.ModeKeys.PREDICT:
@@ -161,7 +161,7 @@ class ModelMfDNN(object):
     def serving_inputs(self):
         placeholders = OrderedDict()
         for name, tensor in self.features.items():
-            placeholders[name] = tf.placeholder(shape=tensor.get_shape().as_list(), dtype=tensor.dtype)
+            placeholders[name] = tf.placeholder(shape=tensor.get_shape().as_list(), dtype=tensor.dtype, name=name)
 
         placeholders['labels'] = self.labels
         return tf.estimator.export.ServingInputReceiver(placeholders, placeholders)
@@ -206,6 +206,7 @@ class MyHook(tf.train.SessionRunHook):
 
     def after_run(self, run_context, run_values):
         print(len(run_values.results))
+
 
 class BestScoreExporter(tf.estimator.Exporter):
     logger = env.logger('BestScoreExporter')

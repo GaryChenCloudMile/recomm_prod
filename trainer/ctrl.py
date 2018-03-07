@@ -76,10 +76,8 @@ class Ctrl(object):
         ret = {}
         p = self.prepare(params)
         s = datetime.now()
-        p = None
         try:
             self.service.gen_data(p)
-
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -147,8 +145,8 @@ class Ctrl(object):
         s = datetime.now()
         try:
             ml = self.service.find_ml()
-            deploy_info = self.service.deploy_info(p)
-            name = 'projects/{}/jobs/{}'.format(env.PROJECT_ID, deploy_info.get('job_id'))
+            # deploy_info = self.service.deploy_info(p)
+            name = 'projects/{}/jobs/{}'.format(env.PROJECT_ID, p.job_id)
             ret[self.RESPONSE] = ml.projects().jobs().get(name=name).execute()
             ret[env.ERR_CDE] = '00'
         except Exception as e:
@@ -214,7 +212,7 @@ class Ctrl(object):
             if p.is_local:
                 p.at['job_id'] = self.find_job_id(p)
 
-            self.service.train(p, schema)
+            ret[self.RESPONSE] = self.service.train(p, schema)
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -237,7 +235,6 @@ class Ctrl(object):
             ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
-            raise e
         finally:
             pass
 
@@ -256,7 +253,6 @@ class Ctrl(object):
             ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
-            raise e
         finally:
             pass
 
@@ -280,7 +276,7 @@ class Ctrl(object):
                     --package-path trainer \
                     -- \
                     --method train \
-                    --is-local true
+                    --is-local true \
                     --conf-path {}
             """.strip() \
                 .format(env.PROJECT_PATH, p.job_dir, p.parsed_conf_path)
@@ -291,10 +287,24 @@ class Ctrl(object):
             ret[env.ERR_CDE] = '99'
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
-            raise e
         finally:
             pass
 
+        return ret
+
+    def transform(self, params):
+        ret = {}
+        p = self.prepare(params)
+        s = datetime.now()
+        try:
+            ret['response'] = self.service.transform(p)
+            ret[env.ERR_CDE] = '00'
+        except Exception as e:
+            ret[env.ERR_CDE] = '99'
+            ret[env.ERR_MSG] = str(e)
+            self.logger.error(e, exc_info=True)
+        finally:
+            self.logger.info('{}: predict take time {}'.format(p.pid, datetime.now() - s))
         return ret
 
     def predict(self, params):
@@ -306,7 +316,8 @@ class Ctrl(object):
             assert parsed_conf.exists(), "can't find schema cause {} not exists" \
                 .format(p.parsed_conf_path)
 
-            ret['response'] = self.service.predict(p)
+            # TODO: hack, just receive response
+            ret.update( self.service.predict(p) )
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -333,7 +344,7 @@ class Ctrl(object):
         ret = {}
         try:
             p = self.prepare(params)
-            ret['response'] = self.service.deploy_info(p)
+            ret['response'] = self.service.init_model(p)
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'
@@ -349,7 +360,6 @@ class Ctrl(object):
         utils.cmd('gcloud ml-engine local predict'
                   ' --model_dir D:/Python/notebook/recomm_prod/repo/foo/model_1518581106.1947258/export/export_foo/1518581138'
                   ' --json-instance ')
-
 
 
 # mock singleton

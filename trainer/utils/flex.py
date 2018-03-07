@@ -457,11 +457,31 @@ class Loader(object):
             data = data.copy()
 
         ret = {}
-        df_conf = self.schema.df_conf_
         col_states = self.schema.col_states_
+        pad = tf.keras.preprocessing.sequence.pad_sequences
         # loop parsed feature columns, cause maybe there're some noise columns in data
         for colname in self.schema.features:
-            ret[colname] = col_states[colname].transform(data[colname]).tolist()
+            col_meta = col_states[colname]
+            val = col_meta.transform(data[colname]).tolist()
+            # if multi columns, create sequence columns
+            if hasattr(col_meta, 'is_multi') and col_meta.is_multi:
+                lens = list(map(len, val))
+                ret[colname] = pad(val, padding="post", maxlen=max(lens)).tolist()
+                ret[colname + '_len'] = lens
+            else:
+                ret[colname] = val
+
+        # TODO hack for debug online prediction
+        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id',
+                'query_movie_ids_len', 'genres_len']
+        ret = OrderedDict(zip(cols, [ret.get(c) for c in cols]))
+
+        ret = pd.Series(ret)
+        l = len(ret['genres'])
+        ret.loc['query_movie_ids'] = np.repeat(ret['query_movie_ids'], l, 0).tolist()
+        ret.loc['query_movie_ids_len'] = np.repeat(ret['query_movie_ids_len'], l, 0).tolist()
+        ret = pd.DataFrame(data=ret.to_dict(), columns=ret.keys())[:5]
+        ret = [dict(zip(r.keys().tolist(), r.values.tolist())) for _, r in ret.iterrows()]
         return ret
 
 
