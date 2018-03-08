@@ -37,24 +37,24 @@ class Service(object):
         loader.transform(p, reset=False, valid_size=.3)
         return loader.schema
 
+    def get_model(self, p):
+        with flex.io(p.parsed_conf_path).as_reader('r') as f:
+            schema = flex.Schema.unserialize(f.stream)
+        return est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
+
+
     def train(self, p, schema):
         self.logger.info('received params: {}'.format(p.to_dict() if isinstance(p, pd.Series) else p))
         model = est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
         train_input = model.input_fn([p.train_file], n_epoch=1, n_batch=p.n_batch)
         valid_input = model.input_fn([p.valid_file], n_epoch=1, n_batch=p.n_batch, shuffle=False)
-        run_config = tf.estimator.RunConfig(
-            log_step_count_steps=300,
-            tf_random_seed=seed,
-            # save_checkpoints_secs=None,
-            # save_checkpoints_steps=p.save_every_steps,
-        )
 
         # try to build local export directory avoid error
         if p.is_local:
             flex.io(utils.join(p.job_dir, 'export', p.export_name)).mkdirs()
             # os.makedirs(utils.join(p.job_dir, 'export', p.export_name))
 
-        model.fit(train_input, valid_input, run_config, reset=True)
+        model.fit(train_input, valid_input, reset=True)
 
         # export deploy info
         deploy_info = {}
@@ -96,7 +96,7 @@ class Service(object):
         model_name = deploy_info.get('model_name')
 
         self.logger.info('try to create model [{}] ...'.format(model_name))
-        self.create_model_rsc(ml, p, model_name)
+        self.create_model_rsc(ml, model_name)
 
         self.logger.info('try to clean old version ...')
         self.clear_model_rsc(ml, p, model_name)
@@ -123,7 +123,7 @@ class Service(object):
 
         return res
 
-    def create_model_rsc(self, ml, p, model_name):
+    def create_model_rsc(self, ml, model_name):
         proj_uri = 'projects/{}'.format(env.PROJECT_ID)
         try:
             ml.projects().models().create(
@@ -174,22 +174,24 @@ class Service(object):
         data_for_model = self.transform(p)
         deploy_info = self.deploy_info(p)
 
-        # python restful api predict
-        # model_uri = 'projects/{}/models/{}'.format(env.PROJECT_ID, deploy_info.get('model_name'))
-        # ml = self.find_ml()
-        # return ml.projects().predict(name=model_uri, body={'instances': [data_for_model]}).execute()
-
-        # gcloud predict
+        # gcloud predict and persistent to file for debug
+        # with flex.io('./data.json').as_writer('w') as f:
+        #     for r in data_for_model:
+        #         f.stream.write(json.dumps(r) + '\n')
         with flex.io('./data.json').as_writer('w') as f:
-            for r in data_for_model:
-                f.stream.write(json.dumps(r) + '\n')
+            json.dump(data_for_model, f.stream)
 
-        commands = '''
-            gcloud ml-engine predict --model {}  \
-                   --version {} \
-                   --json-instances {}
-        '''.strip().format(deploy_info.get('model_name'),
-                           deploy_info.get('version'),
-                           './data.json')
-        return {'data_for_model': data_for_model, 'response': utils.cmd(commands)}
+        # python restful api predict
+        model_uri = 'projects/{}/models/{}'.format(env.PROJECT_ID, deploy_info.get('model_name'))
+        ml = self.find_ml()
+        return {'response': ml.projects().predict(name=model_uri, body={'instances': data_for_model}).execute()}
+
+        # commands = '''
+        #     gcloud ml-engine predict --model {}  \
+        #            --version {} \
+        #            --json-instances {}
+        # '''.strip().format(deploy_info.get('model_name'),
+        #                    deploy_info.get('version'),
+        #                    './data.json')
+        # return {'data_for_model': data_for_model, 'response': utils.cmd(commands)}
 

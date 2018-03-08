@@ -88,7 +88,7 @@ class Ctrl(object):
         return ret
 
     def find_job_id(self, p):
-        return '{}_{}'.format(p.model_id, utils.timestamp()).replace('-', '_')
+        return '{}_{}_{}'.format(p.pid, p.model_id, utils.timestamp()).replace('-', '_')
 
     def train_submit(self, params):
         ret = {}
@@ -239,6 +239,33 @@ class Ctrl(object):
             pass
 
         return ret
+
+    def get_model(self, params):
+        p = self.prepare(params)
+        return self.service.get_model(p)
+
+    def est_predict(self, params):
+        p = self.prepare(params)
+        model = self.service.get_model(p)
+        estimator = model.create_est()
+
+        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id', 'rating']
+        defaults = [[''], [''], [], [], [0], [0]]
+        multi_cols = ('query_movie_ids', 'genres')
+
+        self.service.transform()
+        # def add_seq_cols(feat):
+        #     for m_col in multi_cols:
+        #         name = '{}_len'.format(m_col)
+        #         feat[name] = tf.size(feat[m_col])
+        #         cols.append(name)
+        #     return feat
+        # dataset = dataset.map(add_seq_cols, num_parallel_calls=4)
+        # dataset = dataset.repeat(1)
+        # dataset = dataset.padded_batch(5, OrderedDict(zip(cols, ([None], [None], [], [], [], [], [], [], []))))
+        # features = dataset.make_one_shot_iterator().get_next()
+        # for e in estimator.predict(lambda: dataset):
+        #     print(e)
 
     def deploy(self, params):
         ret = {}

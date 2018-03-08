@@ -24,10 +24,9 @@ class ModelMfDNN(object):
 
     def graphing(self, features, labels, mode):
         p = self.hparam
-        with tf.variable_scope('inputs') as scope:
-            self.features, self.labels = features, labels
-            for name, tensor in self.features.items():
-                setattr(self, name, tensor)
+        self.features, self.labels = features, labels
+        for name, tensor in self.features.items():
+            setattr(self, name, tensor)
 
         with tf.variable_scope("init") as scope:
             init_fn = tf.glorot_normal_initializer()
@@ -61,7 +60,7 @@ class ModelMfDNN(object):
             # genres embedding
             self.emb_genres = tf.nn.embedding_lookup(self.w_genres, tf.to_int32(self.genres))
             genres_mask = tf.expand_dims(
-                tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(tf.reshape(self.genres_len, [-1]))), 1), -1)
+                tf.nn.l2_normalize(tf.to_float(tf.sequence_mask(self.genres_len)), 1), -1)
             self.emb_genres = tf.reduce_sum(self.emb_genres * genres_mask, 1)
 
             self.emb_item = tf.concat([self.candidate_emb, self.emb_genres, self.avg_rating[:, tf.newaxis], self.year[:, tf.newaxis]], 1)
@@ -163,11 +162,18 @@ class ModelMfDNN(object):
         for name, tensor in self.features.items():
             placeholders[name] = tf.placeholder(shape=tensor.get_shape().as_list(), dtype=tensor.dtype, name=name)
 
-        placeholders['labels'] = self.labels
         return tf.estimator.export.ServingInputReceiver(placeholders, placeholders)
 
+    def create_est(self):
+        run_config = tf.estimator.RunConfig(
+            log_step_count_steps=300,
+            tf_random_seed=seed,
+            # save_checkpoints_secs=None,
+            # save_checkpoints_steps=p.save_every_steps,
+        )
+        return tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=run_config)
 
-    def fit(self, train_input, valid_input, run_config, reset=True):
+    def fit(self, train_input, valid_input, reset=True):
         if reset:
             flex.io(self.model_dir).rm()
 
@@ -189,7 +195,8 @@ class ModelMfDNN(object):
         except:
             self.logger.warn( traceback.format_exc() )
 
-        self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=run_config)
+        # self.estimator_ = tf.estimator.Estimator(model_fn=self.graphing, model_dir=self.model_dir, config=run_config)
+        self.estimator_ = self.create_est()
         tf.estimator.train_and_evaluate(self.estimator_, train_spec, eval_spec)
         return self
 
