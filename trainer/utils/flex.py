@@ -462,29 +462,27 @@ class Loader(object):
         # loop parsed feature columns, cause maybe there're some noise columns in data
         for colname in self.schema.features:
             col_meta = col_states[colname]
-            val = col_meta.transform(data[colname]).tolist()
+            val = col_meta.transform(data[colname])
             # if multi columns, create sequence columns
             if hasattr(col_meta, 'is_multi') and col_meta.is_multi:
                 lens = list(map(len, val))
                 ret[colname] = pad(val, padding="post", maxlen=max(lens)).tolist()
-                ret[colname + '_len'] = lens
+                ret[colname + '_len'] = np.array(lens).tolist()
             else:
-                ret[colname] = val
-        ret = [ret]
+                ret[colname] = val.tolist()
 
         # TODO hack for debug online prediction
-        # cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id',
-        #         'query_movie_ids_len', 'genres_len']
-        # ret = OrderedDict(zip(cols, [ret.get(c) for c in cols]))
-        #
-        # ret = pd.Series(ret)
-        # l = len(ret['genres'])
-        # ret.loc['query_movie_ids'] = np.repeat(ret['query_movie_ids'], l, 0).tolist()
-        # ret.loc['query_movie_ids_len'] = np.repeat(ret['query_movie_ids_len'], l, 0).tolist()
-        # ret = pd.DataFrame(data=ret.to_dict(), columns=ret.keys())
-        # ret = [dict(zip(r.keys().tolist(), r.values.tolist())) for _, r in ret.iterrows()]
-        return ret
+        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id',
+                'query_movie_ids_len', 'genres_len']
+        ret = OrderedDict(zip(cols, [ret.get(c) for c in cols]))
 
+        ret = pd.Series(ret)
+        l = len(ret['genres'])
+        ret.loc['query_movie_ids'] = np.repeat(ret['query_movie_ids'], l, 0).tolist()
+        ret.loc['query_movie_ids_len'] = np.repeat(ret['query_movie_ids_len'], l, 0).tolist()
+        ret = pd.DataFrame(data=ret.to_dict(), columns=ret.keys())
+        ret = [dict(zip(r.keys().tolist(), r.values.tolist())) for _, r in ret.iterrows()]
+        return ret
 
 def io(path):
     return FlexIO(path)

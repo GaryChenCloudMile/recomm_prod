@@ -242,30 +242,31 @@ class Ctrl(object):
 
     def get_model(self, params):
         p = self.prepare(params)
-        return self.service.get_model(p)
+        return self.service.get_model(p), p
 
     def est_predict(self, params):
+        import tensorflow as tf
+        from collections import OrderedDict
+
         p = self.prepare(params)
+        p.at['n_batch'] = 128
+        p.at['dim'] = 16
         model = self.service.get_model(p)
         estimator = model.create_est()
+        data_for_model = self.service.transform(p)[0]
 
-        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id', 'rating']
-        defaults = [[''], [''], [], [], [0], [0]]
-        multi_cols = ('query_movie_ids', 'genres')
+        # suprisely, I need to init datasets in a "local closure function" put into estimator's predict params
+        # or I will get a different graph error
+        def input_fn():
+            dataset = tf.data.Dataset.from_tensors(data_for_model)
+            dataset = dataset.repeat(1)
+            dataset = dataset.make_one_shot_iterator().get_next()
+            return dataset, None
 
-        self.service.transform()
-        # def add_seq_cols(feat):
-        #     for m_col in multi_cols:
-        #         name = '{}_len'.format(m_col)
-        #         feat[name] = tf.size(feat[m_col])
-        #         cols.append(name)
-        #     return feat
-        # dataset = dataset.map(add_seq_cols, num_parallel_calls=4)
-        # dataset = dataset.repeat(1)
-        # dataset = dataset.padded_batch(5, OrderedDict(zip(cols, ([None], [None], [], [], [], [], [], [], []))))
-        # features = dataset.make_one_shot_iterator().get_next()
-        # for e in estimator.predict(lambda: dataset):
-        #     print(e)
+        for e in estimator.predict(input_fn=input_fn):
+            print(e)
+
+        return self
 
     def deploy(self, params):
         ret = {}
@@ -331,7 +332,7 @@ class Ctrl(object):
             ret[env.ERR_MSG] = str(e)
             self.logger.error(e, exc_info=True)
         finally:
-            self.logger.info('{}: predict take time {}'.format(p.pid, datetime.now() - s))
+            self.logger.info('{}: transform take time {}'.format(p.pid, datetime.now() - s))
         return ret
 
     def predict(self, params):
@@ -371,7 +372,10 @@ class Ctrl(object):
         ret = {}
         try:
             p = self.prepare(params)
-            ret['response'] = self.service.init_model(p)
+            commands = """
+                saved_model_cli show --dir {} --all
+            """.strip().format('D:/Python/notebook/recomm_prod/repo/foo-bar/movielens_recommendation/model/export/export_foo-bar/1520581839')
+            ret['response'] = utils.cmd(commands)
             ret[env.ERR_CDE] = '00'
         except Exception as e:
             ret[env.ERR_CDE] = '99'

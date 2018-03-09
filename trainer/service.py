@@ -42,7 +42,6 @@ class Service(object):
             schema = flex.Schema.unserialize(f.stream)
         return est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
 
-
     def train(self, p, schema):
         self.logger.info('received params: {}'.format(p.to_dict() if isinstance(p, pd.Series) else p))
         model = est.ModelMfDNN(hparam=p, schema=schema, n_items=9125, n_genres=20)
@@ -60,7 +59,7 @@ class Service(object):
         deploy_info = {}
         deploy_info['job_id'] = p.job_id
         deploy_info['model_name'] = '{}_{}'.format(p.pid, p.model_id).replace('-', '_')
-        deploy_info['export_path'] = model.exporter.export_result.decode()
+        deploy_info['export_path'] = model.exporter.export_result.decode().replace('\\', '/')
         with flex.io(p.deploy_path).as_writer('w') as f:
             yaml.dump(deploy_info, f.stream)
 
@@ -175,16 +174,17 @@ class Service(object):
         deploy_info = self.deploy_info(p)
 
         # gcloud predict and persistent to file for debug
-        # with flex.io('./data.json').as_writer('w') as f:
-        #     for r in data_for_model:
-        #         f.stream.write(json.dumps(r) + '\n')
         with flex.io('./data.json').as_writer('w') as f:
-            json.dump(data_for_model, f.stream)
+            for r in data_for_model:
+                f.stream.write(json.dumps(r) + '\n')
+        # with flex.io('./data.json').as_writer('w') as f:
+        #     json.dump(data_for_model, f.stream)
 
         # python restful api predict
         model_uri = 'projects/{}/models/{}'.format(env.PROJECT_ID, deploy_info.get('model_name'))
         ml = self.find_ml()
-        return {'response': ml.projects().predict(name=model_uri, body={'instances': data_for_model}).execute()}
+        return {'response': ml.projects().predict(
+            name=model_uri, body={'instances': data_for_model}).execute()}
 
         # commands = '''
         #     gcloud ml-engine predict --model {}  \
