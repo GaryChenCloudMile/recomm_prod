@@ -472,16 +472,16 @@ class Loader(object):
                 ret[colname] = val.tolist()
 
         # TODO hack for debug online prediction
-        cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id',
-                'query_movie_ids_len', 'genres_len']
-        ret = OrderedDict(zip(cols, [ret.get(c) for c in cols]))
-
-        ret = pd.Series(ret)
-        l = len(ret['genres'])
-        ret.loc['query_movie_ids'] = np.repeat(ret['query_movie_ids'], l, 0).tolist()
-        ret.loc['query_movie_ids_len'] = np.repeat(ret['query_movie_ids_len'], l, 0).tolist()
-        ret = pd.DataFrame(data=ret.to_dict(), columns=ret.keys())
-        ret = [dict(zip(r.keys().tolist(), r.values.tolist())) for _, r in ret.iterrows()]
+        # cols = ['query_movie_ids', 'genres', 'avg_rating', 'year', 'candidate_movie_id',
+        #         'query_movie_ids_len', 'genres_len']
+        # ret = OrderedDict(zip(cols, [ret.get(c) for c in cols]))
+        #
+        # ret = pd.Series(ret)
+        # l = len(ret['genres'])
+        # ret.loc['query_movie_ids'] = np.repeat(ret['query_movie_ids'], l, 0).tolist()
+        # ret.loc['query_movie_ids_len'] = np.repeat(ret['query_movie_ids_len'], l, 0).tolist()
+        # ret = pd.DataFrame(data=ret.to_dict(), columns=ret.keys())
+        # ret = [dict(zip(r.keys().tolist(), r.values.tolist())) for _, r in ret.iterrows()]
         return ret
 
 def io(path):
