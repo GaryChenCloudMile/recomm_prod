@@ -27,7 +27,7 @@ class Service(object):
 
     def gen_data(self, p):
         p.at['raw_paths'] = self.find_raws(p)
-        assert len(p.raw_paths), 'must supply training data to processing! found nothing in {}' \
+        assert len(p.raw_paths), 'No training data to processing! found nothing in {}' \
             .format(p.raw_dir)
 
         loader = flex.Loader(conf_path=p.conf_path,
